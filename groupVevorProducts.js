@@ -223,7 +223,11 @@ async function main() {
 
         // 1. Load SKU -> product type mapping from CSV
         const mappingCsv = fs.readFileSync(new URL('./vevor_sku_type_mapping.csv', import.meta.url), 'utf-8')
-        const mappingRows = parse(mappingCsv, { columns: true, skip_empty_lines: true, relax_column_count: true })
+        const mappingRows = parse(mappingCsv, {
+            columns: true,
+            skip_empty_lines: true,
+            relax_column_count: true,
+        })
 
         const targetSkus = new Set()
         for (const row of mappingRows) {

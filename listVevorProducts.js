@@ -285,7 +285,12 @@ async function removeFirstImageBackground(imageUrls, store_id) {
         decodedFileName = rawFileName
     }
     const formattedFileName = getFileNameWithTimestamp(decodedFileName, '.webp')
-    return uploadToS3({ image: resizedBuffer, store_id, fileName: formattedFileName, contentType: 'image/webp' })
+    return uploadToS3({
+        image: resizedBuffer,
+        store_id,
+        fileName: formattedFileName,
+        contentType: 'image/webp',
+    })
 }
 
 // ── Image Scraping ──────────────────────────────────────────────────────────
@@ -491,7 +496,10 @@ async function createShopifyProduct({ aiResult, product_type, title, vendor, sku
         try {
             const dbManuals = await getProductManuals(pool, sku)
             if (dbManuals.length > 0) {
-                manuals = dbManuals.map((m) => ({ name: 'User Manual', url: m.manual_url }))
+                manuals = dbManuals.map((m) => ({
+                    name: 'User Manual',
+                    url: m.manual_url,
+                }))
                 console.log(`Found ${dbManuals.length} manual(s) in product_manuals table for SKU ${sku}`)
             }
         } catch (err) {
@@ -564,7 +572,12 @@ async function createShopifyProduct({ aiResult, product_type, title, vendor, sku
         seo: { description: aiResult.MetaDescription },
         tags: ['new', 'AI Lister', ...tags.filter(Boolean)],
         metafields: [
-            { namespace: 'custom', key: 'warranty', value: aiResult.Warranty, type: 'single_line_text_field' },
+            {
+                namespace: 'custom',
+                key: 'warranty',
+                value: aiResult.Warranty,
+                type: 'single_line_text_field',
+            },
             {
                 namespace: 'custom',
                 key: 'manuals',
@@ -762,9 +775,7 @@ async function generateFiltersForNewProduct({ pool, productId, productType, prod
         const filterGroupIdCache = {}
         for (const filterValue of parsed) {
             if (!filterGroupIdCache[filterValue.filterGroup]) {
-                const rows = await query(pool, 'SELECT id FROM filter_groups WHERE name = ?', [
-                    filterValue.filterGroup,
-                ])
+                const rows = await query(pool, 'SELECT id FROM filter_groups WHERE name = ?', [filterValue.filterGroup])
                 filterGroupIdCache[filterValue.filterGroup] = rows[0]?.id || null
             }
 
@@ -797,7 +808,11 @@ async function main() {
         // 1. Load the SKU -> product type mapping
         console.log('Loading SKU type mapping...')
         const mappingCsv = fs.readFileSync(new URL('./vevor_sku_type_mapping.csv', import.meta.url), 'utf-8')
-        const mappingRows = parse(mappingCsv, { columns: true, skip_empty_lines: true, relax_column_count: true })
+        const mappingRows = parse(mappingCsv, {
+            columns: true,
+            skip_empty_lines: true,
+            relax_column_count: true,
+        })
         const skuToProductType = new Map()
         for (const row of mappingRows) {
             const mappedType = row['Mapped Product Type']?.trim()
@@ -995,8 +1010,18 @@ async function main() {
                         barcode: upc,
                         tracked: true,
                         metafields: [
-                            { namespace: 'custom', key: 'upc', value: upc, type: 'single_line_text_field' },
-                            { namespace: 'custom', key: 'supplier_sku', value: sku, type: 'single_line_text_field' },
+                            {
+                                namespace: 'custom',
+                                key: 'upc',
+                                value: upc,
+                                type: 'single_line_text_field',
+                            },
+                            {
+                                namespace: 'custom',
+                                key: 'supplier_sku',
+                                value: sku,
+                                type: 'single_line_text_field',
+                            },
                             {
                                 namespace: 'custom',
                                 key: 'projected_unit_cost',
