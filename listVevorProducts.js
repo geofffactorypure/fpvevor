@@ -568,7 +568,7 @@ async function createShopifyProduct({ aiResult, product_type, title, vendor, sku
         descriptionHtml: aiResult.Description,
         productType: product_type,
         vendor,
-        status: 'DRAFT',
+        status: !media.length ? 'DRAFT' : 'ACTIVE',
         seo: { description: aiResult.MetaDescription },
         tags: ['new', 'AI Lister', ...tags.filter(Boolean)],
         metafields: [
