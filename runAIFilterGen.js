@@ -41,7 +41,7 @@ const query = (sql, args) =>
         })
     })
 
-const openai = new OpenAI()
+const openai = new OpenAI({ apiKey: process.env.OPENAI_AI_LISTER_API_KEY })
 
 const STORE_ID = 1
 
