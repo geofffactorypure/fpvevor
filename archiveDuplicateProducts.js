@@ -19,7 +19,7 @@ import mysql from 'mysql'
 const { DB_PASSWORD, DB_WRITE_HOST, DB_USER } = process.env
 
 const pool = mysql.createPool({
-    connectionLimit: 3,
+    connectionLimit: 10,
     host: DB_WRITE_HOST,
     user: DB_USER,
     password: DB_PASSWORD,
@@ -41,234 +41,6 @@ const API_VERSION = '2025-01'
 
 // ─── PASTE YOUR DUPLICATES ARRAY HERE ───────────────────────────────────────────
 const duplicates = [
-    {
-        newer_product_id: 8310988472509,
-        custom_supplier_sku: '450VS+切纸机-V110',
-        product_count: 2,
-        all_product_ids: '7883192074429,8310988472509',
-    },
-    {
-        newer_product_id: 8310536011965,
-        custom_supplier_sku: 'DCSTHJTC350LLZY72V0',
-        product_count: 2,
-        all_product_ids: '8310488629437,8310536011965',
-    },
-    {
-        newer_product_id: 8310535979197,
-        custom_supplier_sku: 'ZXBSTZGDK16PX3TR1V0',
-        product_count: 2,
-        all_product_ids: '8310488367293,8310535979197',
-    },
-    {
-        newer_product_id: 8310535913661,
-        custom_supplier_sku: 'WBLBGKZDBLGJK91U7V0',
-        product_count: 2,
-        all_product_ids: '8310488400061,8310535913661',
-    },
-    {
-        newer_product_id: 8310535815357,
-        custom_supplier_sku: 'ZXBSTZGDK24PU44S3V0',
-        product_count: 2,
-        all_product_ids: '8310488268989,8310535815357',
-    },
-    {
-        newer_product_id: 8310535782589,
-        custom_supplier_sku: 'DXBSTZGDK25P2B3VYV0',
-        product_count: 2,
-        all_product_ids: '8310488072381,8310535782589',
-    },
-    {
-        newer_product_id: 8310535553213,
-        custom_supplier_sku: 'ZBSZBKDJPVCR0DTJ4V0',
-        product_count: 2,
-        all_product_ids: '8310488531133,8310535553213',
-    },
-    {
-        newer_product_id: 8310535520445,
-        custom_supplier_sku: 'TYXFSLDKSPTFOV1X7V0',
-        product_count: 2,
-        all_product_ids: '8310488301757,8310535520445',
-    },
-    {
-        newer_product_id: 8310535389373,
-        custom_supplier_sku: 'ZXBSTZYTS8PCFM0SYV0',
-        product_count: 2,
-        all_product_ids: '8310488432829,8310535389373',
-    },
-    {
-        newer_product_id: 8310535356605,
-        custom_supplier_sku: 'FRZJYXXKZDBH6WYM1V0',
-        product_count: 2,
-        all_product_ids: '8310488596669,8310535356605',
-    },
-    {
-        newer_product_id: 8310535323837,
-        custom_supplier_sku: 'TTJCXSHL8JTCE1XJVV0',
-        product_count: 2,
-        all_product_ids: '8310488137917,8310535323837',
-    },
-    {
-        newer_product_id: 8310535291069,
-        custom_supplier_sku: 'YDXDYTQCHDHS0W1ASV0',
-        product_count: 2,
-        all_product_ids: '8310488465597,8310535291069',
-    },
-    {
-        newer_product_id: 8310535258301,
-        custom_supplier_sku: 'ZXBSTZYTS8PCA4YAUV0',
-        product_count: 2,
-        all_product_ids: '8310488203453,8310535258301',
-    },
-    {
-        newer_product_id: 8310535225533,
-        custom_supplier_sku: 'ZXBSTZGDK30P60DO5V0',
-        product_count: 2,
-        all_product_ids: '8310488662205,8310535225533',
-    },
-    {
-        newer_product_id: 8310535192765,
-        custom_supplier_sku: 'JXMKTDDYX63C6WSB7V0',
-        product_count: 2,
-        all_product_ids: '8310487711933,8310535192765',
-    },
-    {
-        newer_product_id: 8310535159997,
-        custom_supplier_sku: 'TTJCXSH3JTCXWW22RV0',
-        product_count: 2,
-        all_product_ids: '8310487646397,8310535159997',
-    },
-    {
-        newer_product_id: 8310535127229,
-        custom_supplier_sku: 'JXMKTDDYX27CA4JR9V0',
-        product_count: 2,
-        all_product_ids: '8310487482557,8310535127229',
-    },
-    {
-        newer_product_id: 8310535061693,
-        custom_supplier_sku: 'YDXDYTQCHDSU75W4LV0',
-        product_count: 2,
-        all_product_ids: '8310487613629,8310535061693',
-    },
-    {
-        newer_product_id: 8310535028925,
-        custom_supplier_sku: 'ZXBSTZGDK8PCTOFDPV0',
-        product_count: 2,
-        all_product_ids: '8310488563901,8310535028925',
-    },
-    {
-        newer_product_id: 8310534996157,
-        custom_supplier_sku: 'JXMKTDDYX54CRPNUNV0',
-        product_count: 2,
-        all_product_ids: '8310488498365,8310534996157',
-    },
-    {
-        newer_product_id: 8310534963389,
-        custom_supplier_sku: 'ZKBZKBTZDJ14XDVMKV1',
-        product_count: 2,
-        all_product_ids: '8310487548093,8310534963389',
-    },
-    {
-        newer_product_id: 8310534930621,
-        custom_supplier_sku: 'TTJGDSHH3JTC5JFN1V0',
-        product_count: 2,
-        all_product_ids: '8310488170685,8310534930621',
-    },
-    {
-        newer_product_id: 8310534897853,
-        custom_supplier_sku: 'CDXSNGKHS0000QJ43V0',
-        product_count: 2,
-        all_product_ids: '8310487810237,8310534897853',
-    },
-    {
-        newer_product_id: 8310534865085,
-        custom_supplier_sku: 'SGC440LBS10ICQ7EUV0',
-        product_count: 2,
-        all_product_ids: '8310488334525,8310534865085',
-    },
-    {
-        newer_product_id: 8310534832317,
-        custom_supplier_sku: 'JCHDJCFTKMRHC4Y7LV0',
-        product_count: 2,
-        all_product_ids: '8310487384253,8310534832317',
-    },
-    {
-        newer_product_id: 8310534799549,
-        custom_supplier_sku: 'JXMKTDDYX27CO8GWVV0',
-        product_count: 2,
-        all_product_ids: '8310488236221,8310534799549',
-    },
-    {
-        newer_product_id: 8310534734013,
-        custom_supplier_sku: 'YDXDYTQCHDHSJ4DZOV0',
-        product_count: 2,
-        all_product_ids: '8310487253181,8310534734013',
-    },
-    {
-        newer_product_id: 8310534668477,
-        custom_supplier_sku: 'YDXDYTQCHDHSABE8XV0',
-        product_count: 2,
-        all_product_ids: '8310487777469,8310534668477',
-    },
-    {
-        newer_product_id: 8310534635709,
-        custom_supplier_sku: 'TTJCXSHL6JTC3DNUPV0',
-        product_count: 2,
-        all_product_ids: '8310487515325,8310534635709',
-    },
-    {
-        newer_product_id: 8310534602941,
-        custom_supplier_sku: 'TTJCXSHL4JTC6ECZ9V0',
-        product_count: 2,
-        all_product_ids: '8310487122109,8310534602941',
-    },
-    {
-        newer_product_id: 8310534570173,
-        custom_supplier_sku: 'TTJCXSL3JTCX4OQL0V0',
-        product_count: 2,
-        all_product_ids: '8310487351485,8310534570173',
-    },
-    {
-        newer_product_id: 8310534537405,
-        custom_supplier_sku: 'SLNTZLQYS132KEQNIV1',
-        product_count: 2,
-        all_product_ids: '8310487285949,8310534537405',
-    },
-    {
-        newer_product_id: 8310534504637,
-        custom_supplier_sku: 'YYCHDYYCFTBRX6A1KV0',
-        product_count: 2,
-        all_product_ids: '8310487318717,8310534504637',
-    },
-    {
-        newer_product_id: 8310534471869,
-        custom_supplier_sku: 'YDXDYTQCHDHSRPIATV0',
-        product_count: 2,
-        all_product_ids: '8310486630589,8310534471869',
-    },
-    {
-        newer_product_id: 8310534439101,
-        custom_supplier_sku: 'JXMKTDDYX45C8M4DFV0',
-        product_count: 2,
-        all_product_ids: '8310487744701,8310534439101',
-    },
-    {
-        newer_product_id: 8310534406333,
-        custom_supplier_sku: 'YDXDYTQCHDHSOHOIXV0',
-        product_count: 2,
-        all_product_ids: '8310487580861,8310534406333',
-    },
-    {
-        newer_product_id: 8310534373565,
-        custom_supplier_sku: 'FRZJYXXKZDBHL2LV9V0',
-        product_count: 2,
-        all_product_ids: '8310487089341,8310534373565',
-    },
-    {
-        newer_product_id: 8310534340797,
-        custom_supplier_sku: 'YDXDYTQCHDHSZDW93V0',
-        product_count: 2,
-        all_product_ids: '8310487449789,8310534340797',
-    },
     {
         newer_product_id: 8310534308029,
         custom_supplier_sku: 'YDXDYTQCHDHSU3HWVV0',
@@ -7155,37 +6927,47 @@ async function updateLocalDB(productId, variants) {
     console.log(`  Updated local DB for product ${productId}`)
 }
 
+const CONCURRENCY = 10
+
+async function processProduct(storeInfo, productId, sku) {
+    try {
+        const product = await getVariantsForProduct(storeInfo, productId)
+        if (!product) {
+            console.error(`  [${sku}] Product ${productId} not found on Shopify, skipping.`)
+            return
+        }
+        const variants = product.variants.nodes
+        await updateVariantSkuAndArchive(storeInfo, productId, variants)
+        await updateLocalDB(productId, variants)
+        console.log(`  [${sku}] Done archiving ${productId}`)
+    } catch (err) {
+        console.error(`  [${sku}] Error processing product ${productId}:`, err.message)
+    }
+}
+
 async function main() {
     const storeInfo = await getStoreInfo()
     console.log(`Store: ${storeInfo.shopify_name}`)
-    console.log(`Processing ${duplicates.length} duplicate group(s)\n`)
+    console.log(`Processing ${duplicates.length} duplicate group(s) with concurrency=${CONCURRENCY}\n`)
 
+    // Flatten all archive tasks
+    const tasks = []
     for (const dup of duplicates) {
         const allIds = dup.all_product_ids.split(',').map(Number)
-        // Keep the oldest (smallest ID), archive the rest
         const oldest = Math.min(...allIds)
         const toArchive = allIds.filter((id) => id !== oldest)
-
-        console.log(`\nGroup: SKU=${dup.custom_supplier_sku}`)
-        console.log(`  Keeping product ${oldest}`)
-        console.log(`  Archiving: ${toArchive.join(', ')}`)
-
         for (const productId of toArchive) {
-            try {
-                const product = await getVariantsForProduct(storeInfo, productId)
-                if (!product) {
-                    console.error(`  Product ${productId} not found on Shopify, skipping.`)
-                    continue
-                }
-                const variants = product.variants.nodes
-                await updateVariantSkuAndArchive(storeInfo, productId, variants)
-                await updateLocalDB(productId, variants)
-                // Rate limit: ~2 requests per second
-                await sleep(500)
-            } catch (err) {
-                console.error(`  Error processing product ${productId}:`, err.message)
-            }
+            tasks.push({ productId, sku: dup.custom_supplier_sku })
         }
+    }
+
+    console.log(`Total products to archive: ${tasks.length}`)
+
+    // Process in batches of CONCURRENCY
+    for (let i = 0; i < tasks.length; i += CONCURRENCY) {
+        const batch = tasks.slice(i, i + CONCURRENCY)
+        await Promise.all(batch.map((t) => processProduct(storeInfo, t.productId, t.sku)))
+        console.log(`  Progress: ${Math.min(i + CONCURRENCY, tasks.length)}/${tasks.length}`)
     }
 
     console.log('\nDone!')
