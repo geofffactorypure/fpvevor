@@ -208,7 +208,7 @@ async function getNextGroupNumber(pool, baseGroupName) {
     const existing = await query(
         pool,
         `SELECT group_name FROM product_groups WHERE store_id = ? AND group_name LIKE ?`,
-        [STORE_ID, `${baseGroupName} Auto G%`]
+        [STORE_ID, `${baseGroupName} G%`]
     )
 
     let maxNum = 0
@@ -377,9 +377,9 @@ async function main() {
             // Cap group size
             const groupProducts = matchedProducts.slice(0, MAX_GROUP_SIZE)
 
-            // Determine group name: "Vevor [Product Type] G[N]"
+            // Determine group name: "Vevor [Product Type] Auto G[N]"
             const productType = product.product_type || 'Products'
-            const baseGroupName = `Vevor ${productType}`
+            const baseGroupName = `Vevor ${productType} Auto`
             const groupNum = await getNextGroupNumber(pool, baseGroupName)
             const groupName = `${baseGroupName} G${groupNum}`
 
