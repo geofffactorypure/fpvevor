@@ -403,16 +403,23 @@ async function main() {
                 let existingGroupId = null
                 let existingGroupName = null
                 if (existingLinks.length > 0) {
-                    // Use the group that has the most overlap with our product list
+                    // Use the group that has the most overlap with our product list (only Auto groups)
                     const groupCounts = {}
                     for (const link of existingLinks) {
                         groupCounts[link.group_id] = (groupCounts[link.group_id] || 0) + 1
                     }
-                    existingGroupId = Number(Object.entries(groupCounts).sort((a, b) => b[1] - a[1])[0][0])
-                    const [groupRow] = await query(pool, `SELECT group_name FROM product_groups WHERE id = ?`, [
-                        existingGroupId,
-                    ])
-                    existingGroupName = groupRow ? groupRow.group_name : groupName
+                    // Check each candidate group, pick the best Auto group
+                    const sortedGroups = Object.entries(groupCounts).sort((a, b) => b[1] - a[1])
+                    for (const [gId] of sortedGroups) {
+                        const [groupRow] = await query(pool, `SELECT group_name FROM product_groups WHERE id = ?`, [
+                            gId,
+                        ])
+                        if (groupRow && groupRow.group_name.includes('Auto')) {
+                            existingGroupId = Number(gId)
+                            existingGroupName = groupRow.group_name
+                            break
+                        }
+                    }
                 }
 
                 if (existingGroupId) {
@@ -531,6 +538,7 @@ async function main() {
                     }
                     console.log(`  ✓ Added ${newProducts.length} product(s) to existing group "${existingGroupName}"`)
                     productsGrouped += newProducts.length
+                    groupsCreated++
                     continue
                 }
 
