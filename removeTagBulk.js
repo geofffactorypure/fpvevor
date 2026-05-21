@@ -139,13 +139,17 @@ async function main() {
         }
 
         // 3. Remove from Shopify first (so we can resume if interrupted)
-        const productGids = products.filter((p) => p.admin_graphql_api_id).map((p) => ({
-            id: p.id,
-            gid: p.admin_graphql_api_id,
-        }))
+        const productGids = products
+            .filter((p) => p.admin_graphql_api_id)
+            .map((p) => ({
+                id: p.id,
+                gid: p.admin_graphql_api_id,
+            }))
 
         if (productGids.length > 0) {
-            console.log(`\nRemoving tag from ${productGids.length} product(s) on Shopify (concurrency: ${CONCURRENCY})...`)
+            console.log(
+                `\nRemoving tag from ${productGids.length} product(s) on Shopify (concurrency: ${CONCURRENCY})...`
+            )
             let shopifyDone = 0
 
             for (let i = 0; i < productGids.length; i += CONCURRENCY) {
