@@ -191,11 +191,24 @@ async function updateShopifyMetafields(storeInfo, metafields) {
 // ── Group Name Generation ───────────────────────────────────────────────────
 const usedGroupNumbers = new Map() // baseGroupName -> max number used this run
 
+async function removeFromCurrentGroup(pool, productId) {
+    // Delete option values tied to this product's group link
+    const links = await query(pool, `SELECT id FROM group_product_links WHERE product_id = ? AND store_id = ?`, [
+        productId,
+        STORE_ID,
+    ])
+    for (const link of links) {
+        await query(pool, `DELETE FROM product_group_options WHERE product_link_id = ?`, [link.id])
+    }
+    // Delete the group link itself
+    await query(pool, `DELETE FROM group_product_links WHERE product_id = ? AND store_id = ?`, [productId, STORE_ID])
+}
+
 async function getNextGroupNumber(pool, baseGroupName) {
     const existing = await query(
         pool,
-        `SELECT pg.group_name FROM ${STORE_ID}_product_groups pg WHERE pg.group_name LIKE ?`,
-        [`${baseGroupName} G%`]
+        `SELECT group_name FROM product_groups WHERE store_id = ? AND group_name LIKE ?`,
+        [STORE_ID, `${baseGroupName} Auto G%`]
     )
 
     let maxNum = 0
@@ -278,7 +291,9 @@ async function main() {
         }
 
         // 4. Get already-grouped product IDs to avoid re-grouping
-        const alreadyGrouped = await query(pool, `SELECT gpl.product_id FROM ${STORE_ID}_group_product_links gpl`)
+        const alreadyGrouped = await query(pool, `SELECT product_id FROM group_product_links WHERE store_id = ?`, [
+            STORE_ID,
+        ])
         const groupedProductIds = new Set(alreadyGrouped.map((r) => r.product_id))
 
         // 5. Track which products we've already processed (via scrape)
@@ -342,15 +357,13 @@ async function main() {
             const matchedProducts = []
             for (const variant of scrapeResult.variants) {
                 const dbProduct = skuToProduct.get(variant.sku)
-                if (dbProduct && !groupedProductIds.has(dbProduct.id)) {
+                if (dbProduct) {
                     matchedProducts.push({
                         ...dbProduct,
                         variantOptions: variant.options,
                     })
-                } else if (!dbProduct) {
-                    console.log(`    [MISS] Variant SKU ${variant.sku} not found in skuToProduct`)
                 } else {
-                    console.log(`    [SKIP] Variant SKU ${variant.sku} already grouped`)
+                    console.log(`    [MISS] Variant SKU ${variant.sku} not found in DB`)
                 }
             }
 
@@ -384,7 +397,150 @@ async function main() {
             }
 
             if (!DRY_RUN) {
-                // Create the group
+                // Check if any of these products are already in a group together
+                const productIds = groupProducts.map((mp) => mp.id)
+                const existingLinks = await query(
+                    pool,
+                    `SELECT product_id, group_id FROM group_product_links WHERE store_id = ? AND product_id IN (?)`,
+                    [STORE_ID, productIds]
+                )
+
+                // Find a group that already contains one or more of these products
+                let existingGroupId = null
+                let existingGroupName = null
+                if (existingLinks.length > 0) {
+                    // Use the group that has the most overlap with our product list
+                    const groupCounts = {}
+                    for (const link of existingLinks) {
+                        groupCounts[link.group_id] = (groupCounts[link.group_id] || 0) + 1
+                    }
+                    existingGroupId = Number(Object.entries(groupCounts).sort((a, b) => b[1] - a[1])[0][0])
+                    const [groupRow] = await query(pool, `SELECT group_name FROM product_groups WHERE id = ?`, [
+                        existingGroupId,
+                    ])
+                    existingGroupName = groupRow ? groupRow.group_name : groupName
+                }
+
+                if (existingGroupId) {
+                    const groupId = existingGroupId
+                    console.log(
+                        `  → Found existing group "${existingGroupName}" (id=${groupId}), adding missing products`
+                    )
+
+                    // Get products already in this group
+                    const alreadyInGroup = await query(
+                        pool,
+                        `SELECT product_id FROM group_product_links WHERE group_id = ? AND store_id = ?`,
+                        [groupId, STORE_ID]
+                    )
+                    const alreadyInGroupIds = new Set(alreadyInGroup.map((r) => r.product_id))
+
+                    // Filter to only products not already in this group
+                    const newProducts = groupProducts.filter((mp) => !alreadyInGroupIds.has(mp.id))
+
+                    if (newProducts.length === 0) {
+                        console.log(`    All products already in group, skipping`)
+                        for (const mp of groupProducts) {
+                            processedProductIds.add(mp.id)
+                            groupedProductIds.add(mp.id)
+                        }
+                        continue
+                    }
+
+                    console.log(`    Adding ${newProducts.length} new product(s) to existing group`)
+
+                    // Get existing group options
+                    const createdOptions = await query(
+                        pool,
+                        `SELECT id, option_name, position FROM group_options WHERE group_id = ? ORDER BY position`,
+                        [groupId]
+                    )
+
+                    const shopifyMetafields = []
+                    for (const mp of newProducts) {
+                        // Remove from any current group first
+                        await removeFromCurrentGroup(pool, mp.id)
+
+                        const linkResult = await query(
+                            pool,
+                            `INSERT IGNORE INTO group_product_links(product_id, group_id, store_id) VALUES (?, ?, ?)`,
+                            [mp.id, groupId, STORE_ID]
+                        )
+                        const productLinkId =
+                            linkResult.affectedRows > 0
+                                ? linkResult.insertId
+                                : (
+                                      await query(
+                                          pool,
+                                          `SELECT id FROM group_product_links WHERE product_id = ? AND group_id = ?`,
+                                          [mp.id, groupId]
+                                      )
+                                  )[0].id
+
+                        // Create option values for this product
+                        const optionValueInserts = []
+                        const optionValueStrings = []
+                        for (const option of createdOptions) {
+                            const scrapedGroupName = option.option_name.replace(' Options', '')
+                            const value = mp.variantOptions[scrapedGroupName] || ''
+                            if (value) {
+                                optionValueInserts.push([productLinkId, option.id, value, STORE_ID])
+                                optionValueStrings.push(`${option.option_name}:${value}`)
+                            }
+                        }
+
+                        if (optionValueInserts.length > 0) {
+                            await query(
+                                pool,
+                                `INSERT INTO product_group_options(product_link_id, option_id, option_value, store_id) VALUES ?`,
+                                [optionValueInserts]
+                            )
+                        }
+
+                        await query(pool, `UPDATE products SET custom_group = ? WHERE id = ?`, [
+                            existingGroupName,
+                            mp.id,
+                        ])
+                        const customOptionsValue = JSON.stringify(optionValueStrings)
+                        await query(pool, `UPDATE products SET custom_options = ? WHERE id = ?`, [
+                            customOptionsValue,
+                            mp.id,
+                        ])
+
+                        shopifyMetafields.push({
+                            ownerId: mp.admin_graphql_api_id,
+                            namespace: 'custom',
+                            key: 'group',
+                            type: 'single_line_text_field',
+                            value: existingGroupName,
+                        })
+                        shopifyMetafields.push({
+                            ownerId: mp.admin_graphql_api_id,
+                            namespace: 'custom',
+                            key: 'options',
+                            type: 'list.single_line_text_field',
+                            value: JSON.stringify(optionValueStrings),
+                        })
+
+                        groupedProductIds.add(mp.id)
+                        processedProductIds.add(mp.id)
+                    }
+
+                    // Mark already-grouped products as processed
+                    for (const mp of groupProducts.filter((p) => alreadyInGroupIds.has(p.id))) {
+                        processedProductIds.add(mp.id)
+                        groupedProductIds.add(mp.id)
+                    }
+
+                    if (shopifyMetafields.length > 0) {
+                        await updateShopifyMetafields(storeInfo, shopifyMetafields)
+                    }
+                    console.log(`  ✓ Added ${newProducts.length} product(s) to existing group "${existingGroupName}"`)
+                    productsGrouped += newProducts.length
+                    continue
+                }
+
+                // No existing group found — create new group
                 const groupResult = await query(
                     pool,
                     `INSERT INTO product_groups(group_name, store_id) VALUES (?, ?)`,
@@ -408,13 +564,26 @@ async function main() {
                 // Create product links and option values
                 const shopifyMetafields = []
                 for (const mp of groupProducts) {
-                    // Create product link
+                    // Remove from any current group first
+                    await removeFromCurrentGroup(pool, mp.id)
+
+                    // Create product link (skip if already exists)
                     const linkResult = await query(
                         pool,
-                        `INSERT INTO group_product_links(product_id, group_id, store_id) VALUES (?, ?, ?)`,
+                        `INSERT IGNORE INTO group_product_links(product_id, group_id, store_id) VALUES (?, ?, ?)`,
                         [mp.id, groupId, STORE_ID]
                     )
-                    const productLinkId = linkResult.insertId
+                    if (linkResult.affectedRows === 0) {
+                        // Already linked, fetch existing link ID
+                        const [existing] = await query(
+                            pool,
+                            `SELECT id FROM group_product_links WHERE product_id = ? AND group_id = ?`,
+                            [mp.id, groupId]
+                        )
+                        var productLinkId = existing.id
+                    } else {
+                        var productLinkId = linkResult.insertId
+                    }
 
                     // Create option values for this product
                     const optionValueInserts = []
