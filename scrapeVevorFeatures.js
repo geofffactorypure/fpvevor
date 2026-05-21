@@ -5,6 +5,7 @@ config({ path: './.env.local', override: true })
 import fetch from 'node-fetch'
 import mysql from 'mysql'
 import xlsx from 'xlsx'
+import fs from 'fs'
 import { JSDOM, VirtualConsole } from 'jsdom'
 
 /**
@@ -36,8 +37,11 @@ const PRODUCT_TYPE_FILTER =
     process.argv.find((a) => !a.startsWith('--') && a !== process.argv[0] && a !== process.argv[1]) || null
 const DRY_RUN = process.argv.includes('--dry-run')
 const LIMIT = parseInt((process.argv.find((a) => a.startsWith('--limit=')) || '').split('=')[1]) || Infinity
+const START_AFTER = (process.argv.find((a) => a.startsWith('--after=')) || '').split('=')[1] || null
 const SCRAPE_DELAY_MS = parseInt(process.env.SCRAPE_DELAY_MS) || 1000
 const CONCURRENCY = parseInt(process.env.CONCURRENCY) || 5
+
+const PROGRESS_FILE = new URL('./features_progress.txt', import.meta.url)
 
 const VEVOR_ENDPOINT = process.env.VEVOR_ENDPOINT
 const { DB_PASSWORD, DB_WRITE_HOST, DB_USER } = process.env
@@ -233,7 +237,29 @@ async function main() {
         }
 
         console.log(`Matched ${productsWithLinks.length} product(s) to Vevor URLs`)
-        const toProcess = productsWithLinks.slice(0, LIMIT)
+
+        // Resume from --after flag or progress file
+        let startAfterSku = START_AFTER
+        if (!startAfterSku) {
+            try {
+                startAfterSku = fs.readFileSync(PROGRESS_FILE, 'utf-8').trim()
+            } catch (e) {
+                // no progress file
+            }
+        }
+
+        let filtered = productsWithLinks
+        if (startAfterSku) {
+            const idx = filtered.findIndex((p) => p.sku === startAfterSku)
+            if (idx !== -1) {
+                filtered = filtered.slice(idx + 1)
+                console.log(`Resuming after SKU ${startAfterSku} (skipping ${idx + 1} already processed)`)
+            } else {
+                console.log(`Warning: --after SKU ${startAfterSku} not found in list, starting from beginning`)
+            }
+        }
+
+        const toProcess = filtered.slice(0, LIMIT)
         console.log(`Processing ${toProcess.length} product(s)...\n`)
 
         // 5. Scrape and update
@@ -282,6 +308,9 @@ async function main() {
 
                     console.log(`  [${sku}] ✓ Updated features (${features.length} bullets)`)
                     successCount++
+
+                    // Save progress
+                    fs.writeFileSync(PROGRESS_FILE, sku)
                 })
             )
 
