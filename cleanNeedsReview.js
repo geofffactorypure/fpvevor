@@ -99,7 +99,7 @@ async function main() {
         const reasonTags = await query(
             pool,
             `SELECT product_id FROM product_tags
-             WHERE store_id = ? AND product_id IN (?) AND tag LIKE 'Reason:%'`,
+             WHERE store_id = ? AND product_id IN (?) AND tag LIKE 'Review:%'`,
             [STORE_ID, productIds]
         )
         const hasReasonTagIds = new Set(reasonTags.map((r) => r.product_id))
