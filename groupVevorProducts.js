@@ -308,7 +308,6 @@ async function main() {
             if (processedProductIds.has(product.id)) {
                 continue
             }
-            }
 
             // Parse weblinks to get Vevor URL
             let vevorUrl = null
