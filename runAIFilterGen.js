@@ -105,25 +105,41 @@ async function main() {
 
     console.log(`Processing ${productIds.length} product(s): ${productIds.join(', ')}`)
 
-    // Find collections for these products
-    const collections = await query(
-        `SELECT DISTINCT pc.collection_id, c.title
-         FROM product_collections pc
-         JOIN collections c ON c.id = pc.collection_id
-         WHERE pc.product_id IN (?)`,
+    // Get product details
+    const products = await query(
+        `SELECT p.id, p.title, p.body_html, p.product_type, p.vendor, vn.sku
+         FROM products p
+         LEFT JOIN variants_new vn ON vn.product_id = p.id
+         WHERE p.id IN (?)`,
         [productIds]
     )
 
-    if (collections.length === 0) {
-        console.error('No collections found for the given product IDs.')
+    if (products.length === 0) {
+        console.error('No products found for the given IDs.')
         process.exit(1)
     }
 
-    console.log(`\nFound ${collections.length} collection(s):`)
-    collections.forEach((c) => console.log(`  - [${c.collection_id}] ${c.title}`))
+    // Group products by product_type
+    const productsByType = {}
+    for (const p of products) {
+        const type = p.product_type || 'Unknown'
+        if (!productsByType[type]) productsByType[type] = []
+        productsByType[type].push(p)
+    }
 
-    // For each collection, get the filter groups that already have values for products in that collection
-    for (const collection of collections) {
+    console.log(`\nFound ${Object.keys(productsByType).length} product type(s):`)
+    Object.entries(productsByType).forEach(([type, prods]) => console.log(`  - "${type}" (${prods.length} products)`))
+
+    // For each product type, get the filter groups from the collection with a matching title
+    for (const [productType, typeProducts] of Object.entries(productsByType)) {
+        const collections = await query(`SELECT id, title FROM collections WHERE title = ?`, [productType])
+
+        if (collections.length === 0) {
+            console.log(`\n  No collection found for product type "${productType}" — skipping.`)
+            continue
+        }
+
+        const collection = collections[0]
         const filterGroups = await query(
             `SELECT DISTINCT fg.id, fg.name, fg.type, fg.unit
              FROM filter_groups fg
@@ -136,47 +152,31 @@ async function main() {
                      WHERE collection_id = ?
                  )
              )`,
-            [collection.collection_id]
+            [collection.id]
         )
 
         if (filterGroups.length === 0) {
-            console.log(`\n  Collection "${collection.title}" has no existing filter groups — skipping.`)
+            console.log(`\n  Product type "${productType}" has no existing filter groups — skipping.`)
             continue
         }
 
-        console.log(`\n  Collection "${collection.title}" — ${filterGroups.length} filter group(s):`)
+        console.log(`\n  Product type "${productType}" — ${filterGroups.length} filter group(s):`)
         filterGroups.forEach((fg) => console.log(`    - ${fg.name} (${fg.type}${fg.unit ? ', ' + fg.unit : ''})`))
 
-        // Get product details for the products in this collection
-        const products = await query(
-            `SELECT p.id, p.title, p.body_html, p.product_type, p.vendor, vn.sku
-             FROM products p
-             LEFT JOIN variants_new vn ON vn.product_id = p.id
-             WHERE p.id IN (?)`,
-            [productIds]
-        )
+        console.log(`\n  Generating filter values for ${typeProducts.length} product(s)...`)
 
-        const collectionProductIds = await query(
-            `SELECT product_id FROM product_collections WHERE collection_id = ? AND product_id IN (?)`,
-            [collection.collection_id, productIds]
-        )
-        const collectionProductIdSet = new Set(collectionProductIds.map((r) => r.product_id))
-        const filteredProducts = products.filter((p) => collectionProductIdSet.has(p.id))
-
-        console.log(`\n  Generating filter values for ${filteredProducts.length} product(s)...`)
-
-        // Delete existing filter values for these products in this collection's filter groups so we can redo
+        // Delete existing filter values for these products in this type's filter groups so we can redo
         const fgIds = filterGroups.map((fg) => fg.id)
-        const filteredProductIds = filteredProducts.map((p) => p.id)
-        if (fgIds.length > 0 && filteredProductIds.length > 0) {
+        const typeProductIds = typeProducts.map((p) => p.id)
+        if (fgIds.length > 0 && typeProductIds.length > 0) {
             await query(`DELETE FROM product_filter_values_new WHERE product_id IN (?) AND filter_group_id IN (?)`, [
-                filteredProductIds,
+                typeProductIds,
                 fgIds,
             ])
-            console.log(`    Cleared existing filter values for ${filteredProductIds.length} product(s)`)
+            console.log(`    Cleared existing filter values for ${typeProductIds.length} product(s)`)
         }
 
-        for (const product of filteredProducts) {
+        for (const product of typeProducts) {
             console.log(`\n    Processing: ${product.title} (${product.id})`)
 
             const filterValues = await generateFilterValues(product, filterGroups)
