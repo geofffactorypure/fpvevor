@@ -273,20 +273,20 @@ async function main() {
 
         // Build SKU -> product map (only for SKUs from the CSV)
         const skuToProduct = new Map()
-        const ungroupedProducts = []
+        const productsToProcess = []
         for (const p of allMatchingProducts) {
             if (targetSkus.has(p.sku)) {
                 skuToProduct.set(p.sku, p)
-                if (!p.custom_group && p.custom_weblinks && p.custom_weblinks !== '[]') {
-                    ungroupedProducts.push(p)
+                if (p.custom_weblinks && p.custom_weblinks !== '[]') {
+                    productsToProcess.push(p)
                 }
             }
         }
 
         console.log(`Matched ${skuToProduct.size} SKUs to products in DB`)
-        console.log(`Found ${ungroupedProducts.length} ungrouped product(s) with weblinks\n`)
-        if (ungroupedProducts.length === 0) {
-            console.log('Nothing to group. Exiting.')
+        console.log(`Found ${productsToProcess.length} product(s) with weblinks to process\n`)
+        if (productsToProcess.length === 0) {
+            console.log('Nothing to process. Exiting.')
             return
         }
 
@@ -303,16 +303,11 @@ async function main() {
         let groupsCreated = 0
         let productsGrouped = 0
 
-        // 6. Process each ungrouped product
-        for (const product of ungroupedProducts) {
+        // 6. Process each product
+        for (const product of productsToProcess) {
             if (processedProductIds.has(product.id)) {
-                console.log(`  [SKIP] ${product.sku} - already processed this run`)
                 continue
             }
-            if (groupedProductIds.has(product.id)) {
-                console.log(`  [SKIP] ${product.sku} - already in group_product_links`)
-                processedProductIds.add(product.id)
-                continue
             }
 
             // Parse weblinks to get Vevor URL
