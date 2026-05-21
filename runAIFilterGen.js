@@ -76,7 +76,7 @@ Return a JSON object where each key is the exact filter group name and the value
 Only return the JSON object, no markdown or other text.`
 
     const response = await openai.responses.create({
-        model: 'gpt-5.2',
+        model: 'gpt-5.4',
         tools: [{ type: 'web_search' }],
         input: prompt,
     })
