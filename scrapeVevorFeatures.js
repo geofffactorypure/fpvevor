@@ -97,7 +97,9 @@ async function shopifyGraphQL(storeInfo, queryStr, variables, retries = 3) {
         } catch (err) {
             if (attempt === retries) throw err
             const delay = 2000 * attempt
-            console.log(`  [RETRY] Shopify request failed (attempt ${attempt}/${retries}): ${err.message}, retrying in ${delay}ms...`)
+            console.log(
+                `  [RETRY] Shopify request failed (attempt ${attempt}/${retries}): ${err.message}, retrying in ${delay}ms...`
+            )
             await new Promise((resolve) => setTimeout(resolve, delay))
         }
     }
