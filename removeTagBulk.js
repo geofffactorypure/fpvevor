@@ -24,7 +24,7 @@ import mysql from 'mysql'
 const STORE_ID = 1
 const SHOPIFY_API_VERSION = '2025-01'
 const BATCH_SIZE = 250 // DB query batch size
-const SHOPIFY_BATCH_SIZE = 25 // Shopify metafieldsSet / tagsRemove batch size
+const CONCURRENCY = 10 // Parallel Shopify requests (Plus: 10k bucket, 1k/sec restore, 10pt per mutation)
 
 const { DB_PASSWORD, DB_WRITE_HOST, DB_USER } = process.env
 
@@ -80,37 +80,6 @@ async function shopifyGraphQL(storeInfo, queryStr, variables) {
         }
     )
     return res.json()
-}
-
-async function removeTagsFromShopify(storeInfo, productGids, tag) {
-    // Use tagsRemove mutation in batches
-    for (let i = 0; i < productGids.length; i += SHOPIFY_BATCH_SIZE) {
-        const batch = productGids.slice(i, i + SHOPIFY_BATCH_SIZE)
-
-        // tagsRemove only works on one product at a time, so we loop
-        for (const gid of batch) {
-            const result = await shopifyGraphQL(
-                storeInfo,
-                `mutation tagsRemove($id: ID!, $tags: [String!]!) {
-                    tagsRemove(id: $id, tags: $tags) {
-                        node { id }
-                        userErrors { field message }
-                    }
-                }`,
-                { id: gid, tags: [tag] }
-            )
-
-            const errors = result.data?.tagsRemove?.userErrors
-            if (errors && errors.length > 0) {
-                console.error(`  Shopify error for ${gid}:`, errors)
-            }
-        }
-
-        // Brief pause between batches to avoid rate limits
-        if (i + SHOPIFY_BATCH_SIZE < productGids.length) {
-            await new Promise((resolve) => setTimeout(resolve, 500))
-        }
-    }
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -169,8 +138,53 @@ async function main() {
             return
         }
 
-        // 3. Remove from product_tags table
+        // 3. Remove from Shopify first (so we can resume if interrupted)
+        const productGids = products.filter((p) => p.admin_graphql_api_id).map((p) => ({
+            id: p.id,
+            gid: p.admin_graphql_api_id,
+        }))
+
+        if (productGids.length > 0) {
+            console.log(`\nRemoving tag from ${productGids.length} product(s) on Shopify (concurrency: ${CONCURRENCY})...`)
+            let shopifyDone = 0
+
+            for (let i = 0; i < productGids.length; i += CONCURRENCY) {
+                const chunk = productGids.slice(i, i + CONCURRENCY)
+                const results = await Promise.all(
+                    chunk.map(({ gid }) =>
+                        shopifyGraphQL(
+                            storeInfo,
+                            `mutation tagsRemove($id: ID!, $tags: [String!]!) {
+                                tagsRemove(id: $id, tags: $tags) {
+                                    node { id }
+                                    userErrors { field message }
+                                }
+                            }`,
+                            { id: gid, tags: [tag] }
+                        )
+                    )
+                )
+
+                for (let j = 0; j < results.length; j++) {
+                    const errors = results[j].data?.tagsRemove?.userErrors
+                    if (errors && errors.length > 0) {
+                        console.error(`  Shopify error for ${chunk[j].gid}:`, errors)
+                    }
+                }
+
+                shopifyDone += chunk.length
+                if (shopifyDone % 100 < CONCURRENCY || shopifyDone === productGids.length) {
+                    console.log(`  Shopify progress: ${shopifyDone}/${productGids.length}`)
+                }
+            }
+            console.log(`✓ Removed tag from Shopify`)
+        } else {
+            console.log(`No Shopify GIDs found, skipping Shopify update`)
+        }
+
+        // 4. Remove from product_tags table
         const productIds = products.map((p) => p.id)
+        let dbDone = 0
         for (let i = 0; i < productIds.length; i += BATCH_SIZE) {
             const batch = productIds.slice(i, i + BATCH_SIZE)
             await query(pool, `DELETE FROM product_tags WHERE tag = ? AND store_id = ? AND product_id IN (?)`, [
@@ -178,18 +192,10 @@ async function main() {
                 STORE_ID,
                 batch,
             ])
+            dbDone += batch.length
+            console.log(`  DB progress: ${dbDone}/${productIds.length}`)
         }
-        console.log(`\n✓ Removed tag from product_tags table`)
-
-        // 4. Remove from Shopify
-        const productGids = products.map((p) => p.admin_graphql_api_id).filter(Boolean)
-        if (productGids.length > 0) {
-            console.log(`Removing tag from ${productGids.length} product(s) on Shopify...`)
-            await removeTagsFromShopify(storeInfo, productGids, tag)
-            console.log(`✓ Removed tag from Shopify`)
-        } else {
-            console.log(`No Shopify GIDs found, skipping Shopify update`)
-        }
+        console.log(`✓ Removed tag from product_tags table`)
 
         console.log(`\n═══ Done ═══`)
         console.log(`Removed tag "${tag}" from ${products.length} product(s)`)
