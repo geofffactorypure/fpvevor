@@ -46,39 +46,27 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_AI_LISTER_API_KEY })
 const STORE_ID = 1
 
 async function generateFilterValues(product, filterGroups) {
-    const filterGroupDescriptions = filterGroups
-        .map((fg) => {
-            if (fg.type === 'range') {
-                return `- "${fg.name}" (type: range, unit: ${fg.unit}) — provide a numeric value`
-            }
-            return `- "${fg.name}" (type: checkbox) — provide applicable value(s) as a string or array of strings`
-        })
-        .join('\n')
-
-    const prompt = `Given the following product, determine the appropriate filter values for each filter group.
-
-Product:
-- ID: ${product.id}
-- Title: ${product.title}
-- SKU: ${product.sku || 'N/A'}
-- Description: ${product.body_html ? product.body_html.replace(/<[^>]*>/g, '').substring(0, 2000) : 'N/A'}
-- Product Type: ${product.product_type || 'N/A'}
-- Vendor: ${product.vendor || 'N/A'}
-
-Filter Groups to populate:
-${filterGroupDescriptions}
-
-Return a JSON object where each key is the exact filter group name and the value is either:
-- A single value (string or number) for the filter
-- An array of values if multiple apply (for checkbox types)
-- null if the filter doesn't apply to this product
-
-Only return the JSON object, no markdown or other text.`
-
     const response = await openai.responses.create({
         model: 'gpt-5.4',
         tools: [{ type: 'web_search' }],
-        input: prompt,
+        input: `I am generating filters for a collection page by product type.
+                I will give you a json objects that has rows of products with id, title, specs, and features.
+                I will also give you a list of filter groups.
+                Use the specs, title, and features to find the filter values for each filter group.
+                if you cant find a value, do a web search of the product title to find these details for each filter that is missing values, we want good coverage.
+                I need filter values based on the specifications for each product id that fit into the filter groups.
+                Give me an array of objects like { filterGroup: string; filterValue: string, productId: number } for each product id.
+                If the filter values are numeric it should just be 1 number, if its more of a feature then minimum number of words to describe it.
+                The goal is filtering so if something has more or less the same value for a filter group then it should be in the same filter value.
+                The filter groups that are not ranges have previous values that have been used for other products, try to reuse those values if it makes sense to create consistency across products.
+                If the filter group is a range the filter value can just be the number.
+                If it exists, use the features group sparingly, we only want at most 5 different features
+                dont include \`\`\`json in the output text
+                dont include comments because I am json parsing the output
+
+                Here is the product: ${JSON.stringify(product)}
+                Here are the filter groups: ${JSON.stringify(filterGroups)}
+                `,
     })
 
     try {
@@ -130,34 +118,39 @@ async function main() {
     console.log(`\nFound ${Object.keys(productsByType).length} product type(s):`)
     Object.entries(productsByType).forEach(([type, prods]) => console.log(`  - "${type}" (${prods.length} products)`))
 
-    // For each product type, get the filter groups from the collection with a matching title
+    // For each product type, get the filter groups directly by product_type
     for (const [productType, typeProducts] of Object.entries(productsByType)) {
-        const collections = await query(`SELECT id, title FROM collections WHERE title = ?`, [productType])
-
-        if (collections.length === 0) {
-            console.log(`\n  No collection found for product type "${productType}" — skipping.`)
-            continue
-        }
-
-        const collection = collections[0]
         const filterGroups = await query(
             `SELECT DISTINCT fg.id, fg.name, fg.type, fg.unit
-             FROM filter_groups fg
-             WHERE fg.id IN (
-                 SELECT filter_group_id
-                 FROM product_filter_values_new
-                 WHERE product_id IN (
-                     SELECT product_id
-                     FROM product_collections
-                     WHERE collection_id = ?
-                 )
-             )`,
-            [collection.id]
+             FROM product_filter_values_new pfv
+             JOIN filter_groups fg ON fg.id = pfv.filter_group_id
+             JOIN products p ON p.id = pfv.product_id
+             WHERE p.product_type = ?`,
+            [productType]
         )
 
         if (filterGroups.length === 0) {
             console.log(`\n  Product type "${productType}" has no existing filter groups — skipping.`)
             continue
+        }
+
+        // Build filter groups with existing values (like the AI lister does)
+        const filterGroupsWithValues = []
+        for (const fg of filterGroups) {
+            const existingValues = await query(
+                `SELECT DISTINCT pfv.value 
+                 FROM product_filter_values_new pfv
+                 JOIN products p ON p.id = pfv.product_id
+                 WHERE pfv.filter_group_id = ? AND p.product_type = ?
+                 LIMIT 50`,
+                [fg.id, productType]
+            )
+            filterGroupsWithValues.push({
+                name: fg.name,
+                type: fg.type,
+                unit: fg.unit || '',
+                previousValues: existingValues.map((r) => r.value),
+            })
         }
 
         console.log(`\n  Product type "${productType}" — ${filterGroups.length} filter group(s):`)
@@ -176,31 +169,42 @@ async function main() {
             console.log(`    Cleared existing filter values for ${typeProductIds.length} product(s)`)
         }
 
+        // Build a filter group name -> id map
+        const filterGroupIdMap = {}
+        for (const fg of filterGroups) {
+            filterGroupIdMap[fg.name] = fg.id
+        }
+
         for (const product of typeProducts) {
             console.log(`\n    Processing: ${product.title} (${product.id})`)
 
-            const filterValues = await generateFilterValues(product, filterGroups)
+            const productPayload = {
+                id: product.id,
+                title: product.title,
+                custom_specifications: product.body_html
+                    ? product.body_html.replace(/<[^>]*>/g, '').substring(0, 2000)
+                    : null,
+                custom_features: null,
+            }
+
+            const filterValues = await generateFilterValues(productPayload, filterGroupsWithValues)
             if (!filterValues) {
                 console.log(`      Skipped — no values returned`)
                 continue
             }
 
             let insertCount = 0
-            for (const fg of filterGroups) {
-                const value = filterValues[fg.name]
-                if (value == null) continue
-
-                const values = Array.isArray(value) ? value : [value]
-                for (const v of values) {
-                    const stringValue = String(v)
-                    if (!stringValue) continue
-
-                    await query(
-                        `INSERT IGNORE INTO product_filter_values_new (product_id, filter_group_id, value, store_id) VALUES (?, ?, ?, ?)`,
-                        [product.id, fg.id, stringValue, STORE_ID]
-                    )
-                    insertCount++
+            for (const fv of filterValues) {
+                const fgId = filterGroupIdMap[fv.filterGroup]
+                if (!fgId) {
+                    console.error(`      Filter group not found: ${fv.filterGroup}`)
+                    continue
                 }
+                await query(
+                    `INSERT IGNORE INTO product_filter_values_new (product_id, filter_group_id, value, store_id) VALUES (?, ?, ?, ?)`,
+                    [product.id, fgId, fv.filterValue, STORE_ID]
+                )
+                insertCount++
             }
             console.log(`      Inserted ${insertCount} filter value(s)`)
         }
