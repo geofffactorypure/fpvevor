@@ -6,7 +6,8 @@
   "scripts": {
     "list": "node listVevorProducts.js",
     "group": "node groupVevorProducts.js",
-    "features": "node scrapeVevorFeatures.js"
+    "features": "node scrapeVevorFeatures.js",
+    "remove-tag": "node removeTagBulk.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.0.0",
