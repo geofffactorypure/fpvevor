@@ -39,7 +39,7 @@ const DRY_RUN = process.argv.includes('--dry-run')
 const LIMIT = parseInt((process.argv.find((a) => a.startsWith('--limit=')) || '').split('=')[1]) || Infinity
 const START_AFTER = (process.argv.find((a) => a.startsWith('--after=')) || '').split('=')[1] || null
 const SCRAPE_DELAY_MS = parseInt(process.env.SCRAPE_DELAY_MS) || 0
-const CONCURRENCY = parseInt(process.env.CONCURRENCY) || 10
+const CONCURRENCY = parseInt(process.env.CONCURRENCY) || 20
 
 const PROGRESS_FILE = new URL('./features_progress.txt', import.meta.url)
 
@@ -282,17 +282,15 @@ async function main() {
                         if (DRY_RUN) {
                             throw new Error(`No features found on page for ${sku}: ${vevorUrl}`)
                         }
-                        console.log(`  [SKIP] ${sku} - no features found on page`)
                         skipCount++
                         return
                     }
 
-                    console.log(`  [${sku}] Found ${features.length} feature(s):`)
-                    for (const f of features) {
-                        console.log(`    • ${f}`)
-                    }
-
                     if (DRY_RUN) {
+                        console.log(`  [${sku}] Found ${features.length} feature(s):`)
+                        for (const f of features) {
+                            console.log(`    • ${f}`)
+                        }
                         console.log(`  [DRY RUN] Would update ${title}`)
                         successCount++
                         return
@@ -308,7 +306,6 @@ async function main() {
                         id,
                     ])
 
-                    console.log(`  [${sku}] ✓ Updated features (${features.length} bullets)`)
                     successCount++
 
                     // Save progress
@@ -321,6 +318,14 @@ async function main() {
                     failCount++
                     console.error(`  ✗ Error:`, r.reason?.message || r.reason)
                 }
+            }
+
+            // Progress summary every 100 products
+            const processed = i + batch.length
+            if (processed % 100 < CONCURRENCY || processed === toProcess.length) {
+                console.log(
+                    `  Progress: ${processed}/${toProcess.length} (${successCount} ok, ${skipCount} skip, ${failCount} fail)`
+                )
             }
 
             // Rate limit between batches (if configured)
