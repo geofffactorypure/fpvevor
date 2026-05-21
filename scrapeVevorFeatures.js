@@ -125,8 +125,14 @@ async function updateShopifyFeatures(storeInfo, productGid, features) {
             ],
         }
     )
+    if (result.errors?.length > 0) {
+        throw new Error(`Shopify GraphQL errors: ${result.errors.map((e) => e.message).join(', ')}`)
+    }
     if (result.data?.metafieldsSet?.userErrors?.length > 0) {
         throw new Error(`Shopify metafield errors: ${JSON.stringify(result.data.metafieldsSet.userErrors)}`)
+    }
+    if (!result.data) {
+        throw new Error(`Shopify returned unexpected response: ${JSON.stringify(result).slice(0, 200)}`)
     }
     return result
 }

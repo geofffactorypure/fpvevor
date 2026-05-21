@@ -8,7 +8,9 @@
     "group": "node groupVevorProducts.js",
     "features": "node scrapeVevorFeatures.js",
     "remove-tag": "node removeTagBulk.js",
-    "clean-needs-review": "node cleanNeedsReview.js"
+    "clean-needs-review": "node cleanNeedsReview.js",
+    "ai-filters": "node runAIFilterGen.js",
+    "archive-dupes": "node archiveDuplicateProducts.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.0.0",
