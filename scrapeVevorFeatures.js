@@ -38,8 +38,8 @@ const PRODUCT_TYPE_FILTER =
 const DRY_RUN = process.argv.includes('--dry-run')
 const LIMIT = parseInt((process.argv.find((a) => a.startsWith('--limit=')) || '').split('=')[1]) || Infinity
 const START_AFTER = (process.argv.find((a) => a.startsWith('--after=')) || '').split('=')[1] || null
-const SCRAPE_DELAY_MS = parseInt(process.env.SCRAPE_DELAY_MS) || 1000
-const CONCURRENCY = parseInt(process.env.CONCURRENCY) || 5
+const SCRAPE_DELAY_MS = parseInt(process.env.SCRAPE_DELAY_MS) || 0
+const CONCURRENCY = parseInt(process.env.CONCURRENCY) || 10
 
 const PROGRESS_FILE = new URL('./features_progress.txt', import.meta.url)
 
@@ -323,8 +323,8 @@ async function main() {
                 }
             }
 
-            // Rate limit between batches
-            if (i + CONCURRENCY < toProcess.length) {
+            // Rate limit between batches (if configured)
+            if (SCRAPE_DELAY_MS > 0 && i + CONCURRENCY < toProcess.length) {
                 await new Promise((resolve) => setTimeout(resolve, SCRAPE_DELAY_MS))
             }
         }
