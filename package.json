@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "list": "node listVevorProducts.js",
-    "group": "node groupVevorProducts.js"
+    "group": "node groupVevorProducts.js",
+    "features": "node scrapeVevorFeatures.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.0.0",
