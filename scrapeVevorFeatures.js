@@ -72,19 +72,31 @@ function query(pool, sql, args = []) {
 }
 
 // ── Shopify ─────────────────────────────────────────────────────────────────
-async function shopifyGraphQL(storeInfo, queryStr, variables) {
-    const res = await fetch(
-        `https://${storeInfo.shopify_name}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-        {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Shopify-Access-Token': storeInfo.access_token,
-            },
-            body: JSON.stringify({ query: queryStr, variables }),
+async function shopifyGraphQL(storeInfo, queryStr, variables, retries = 3) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const res = await fetch(
+                `https://${storeInfo.shopify_name}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Shopify-Access-Token': storeInfo.access_token,
+                    },
+                    body: JSON.stringify({ query: queryStr, variables }),
+                }
+            )
+            if (res.status === 429 || res.status >= 500) {
+                throw new Error(`Shopify returned ${res.status}`)
+            }
+            return res.json()
+        } catch (err) {
+            if (attempt === retries) throw err
+            const delay = 2000 * attempt
+            console.log(`  [RETRY] Shopify request failed (attempt ${attempt}/${retries}): ${err.message}, retrying in ${delay}ms...`)
+            await new Promise((resolve) => setTimeout(resolve, delay))
         }
-    )
-    return res.json()
+    }
 }
 
 async function updateShopifyFeatures(storeInfo, productGid, features) {
@@ -130,7 +142,11 @@ async function scrapeFeatures(productUrl) {
         if (!featuresList) return null
 
         const items = Array.from(featuresList.querySelectorAll('li'))
-        const features = items.map((li) => li.textContent.trim()).filter((text) => text.length > 0)
+        const features = items
+            .map((li) => li.textContent.trim())
+            .filter((text) => text.length > 0)
+            .map((text) => text.replace(/【/g, '').replace(/】/g, ': ').trim())
+            .filter((text) => text.length > 0)
 
         return features.length > 0 ? features : null
     } finally {
