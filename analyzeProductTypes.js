@@ -94,8 +94,9 @@ async function main() {
                 console.log(`  ⚠ [${product.id}] "${product.title}" (type: ${product.product_type})`)
             }
 
-            if ((i + 1) % 100 === 0) {
-                console.log(`  Progress: ${i + 1}/${products.length} (${flagged} flagged)`)
+            if ((i + 1) % 50 === 0 || i === products.length - 1) {
+                const pct = (((i + 1) / products.length) * 100).toFixed(1)
+                console.log(`  Progress: ${i + 1}/${products.length} (${pct}%) — ${flagged} flagged`)
             }
         }
 
