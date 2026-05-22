@@ -20,6 +20,7 @@ const { DB_PASSWORD, DB_WRITE_HOST, DB_USER } = process.env
 
 const STORE_ID = 1
 const OUTPUT_FILE = './needs_review.txt'
+const CONCURRENCY = 20
 
 const pool = mysql.createPool({
     connectionLimit: 3,
@@ -82,21 +83,30 @@ async function main() {
         }
 
         let flagged = 0
+        let done = 0
 
-        for (let i = 0; i < products.length; i++) {
-            const product = products[i]
-            const bad = await needsReview(product)
+        for (let i = 0; i < products.length; i += CONCURRENCY) {
+            const batch = products.slice(i, i + CONCURRENCY)
+            const results = await Promise.all(
+                batch.map(async (product) => {
+                    const bad = await needsReview(product)
+                    return { product, bad }
+                })
+            )
 
-            if (bad) {
-                flagged++
-                const line = `${product.id}\t${product.product_type}\t${product.title}\n`
-                fs.appendFileSync(OUTPUT_FILE, line)
-                console.log(`  ⚠ [${product.id}] "${product.title}" (type: ${product.product_type})`)
+            for (const { product, bad } of results) {
+                done++
+                if (bad) {
+                    flagged++
+                    const line = `${product.id}\t${product.product_type}\t${product.title}\n`
+                    fs.appendFileSync(OUTPUT_FILE, line)
+                    console.log(`  ⚠ [${product.id}] "${product.title}" (type: ${product.product_type})`)
+                }
             }
 
-            if ((i + 1) % 50 === 0 || i === products.length - 1) {
-                const pct = (((i + 1) / products.length) * 100).toFixed(1)
-                console.log(`  Progress: ${i + 1}/${products.length} (${pct}%) — ${flagged} flagged`)
+            if (done % 100 < CONCURRENCY || done === products.length) {
+                const pct = ((done / products.length) * 100).toFixed(1)
+                console.log(`  Progress: ${done}/${products.length} (${pct}%) — ${flagged} flagged`)
             }
         }
 
