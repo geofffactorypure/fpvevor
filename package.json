@@ -10,6 +10,7 @@
     "remove-tag": "node removeTagBulk.js",
     "clean-needs-review": "node cleanNeedsReview.js",
     "ai-filters": "node runAIFilterGen.js",
+    "ai-type-review": "node aiProductTypeReview.js",
     "archive-dupes": "node archiveDuplicateProducts.js"
   },
   "dependencies": {
