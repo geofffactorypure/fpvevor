@@ -47,7 +47,7 @@ const rawMessage = [
     `--${boundary}--`,
 ].join('\r\n')
 
-const ses = new SESClient({ region: 'us-east-1' })
+const ses = new SESClient({ region: 'us-east-2' })
 
 try {
     await ses.send(
