@@ -19,7 +19,7 @@ import { SESClient, SendRawEmailCommand } from '@aws-sdk/client-ses'
  *   node mapNewVevorSkus.js
  */
 
-const { DB_PASSWORD, DB_WRITE_HOST, DB_USER, OPENAI_API_KEY } = process.env
+const { DB_PASSWORD, DB_WRITE_HOST, DB_USER, OPENAI_AI_LISTER_API_KEY } = process.env
 
 const INPUT_FILE = new URL('./new_vevor_skus.csv', import.meta.url)
 const MAPPING_FILE = new URL('./vevor_sku_type_mapping.csv', import.meta.url)
@@ -49,7 +49,7 @@ function query(pool, sql, args = []) {
 }
 
 // ── AI ──────────────────────────────────────────────────────────────────────
-const client = new OpenAI({ apiKey: OPENAI_API_KEY, timeout: 120000, maxRetries: 2 })
+const client = new OpenAI({ apiKey: OPENAI_AI_LISTER_API_KEY, timeout: 120000, maxRetries: 2 })
 
 async function matchBatch(vevorTypeBatch, fpTypes) {
     const systemPrompt = `You are a product taxonomy expert for an e-commerce store. Given a list of Vevor product type paths (hierarchical, separated by ">"), map each one to the best matching product type from our store's existing type list.
