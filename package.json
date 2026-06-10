@@ -11,7 +11,8 @@
     "clean-needs-review": "node cleanNeedsReview.js",
     "ai-filters": "node runAIFilterGen.js",
     "ai-type-review": "node aiProductTypeReview.js",
-    "archive-dupes": "node archiveDuplicateProducts.js"
+    "archive-dupes": "node archiveDuplicateProducts.js",
+    "cross-sells": "node scrapeVevorCrossSells.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.0.0",
