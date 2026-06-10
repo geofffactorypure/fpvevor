@@ -12,10 +12,12 @@
     "ai-filters": "node runAIFilterGen.js",
     "ai-type-review": "node aiProductTypeReview.js",
     "archive-dupes": "node archiveDuplicateProducts.js",
-    "cross-sells": "node scrapeVevorCrossSells.js"
+    "cross-sells": "node scrapeVevorCrossSells.js",
+    "find-new": "node findNewVevorSkus.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-ses": "^3.1066.0",
     "@aws-sdk/lib-storage": "^3.0.0",
     "csv-parse": "^5.0.0",
     "dotenv": "^16.0.0",
