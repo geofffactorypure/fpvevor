@@ -39,7 +39,7 @@ const DRY_RUN = process.argv.includes('--dry-run')
 const LIMIT = parseInt((process.argv.find((a) => a.startsWith('--limit=')) || '').split('=')[1]) || Infinity
 const START_AFTER = (process.argv.find((a) => a.startsWith('--after=')) || '').split('=')[1] || null
 const SCRAPE_DELAY_MS = parseInt(process.env.SCRAPE_DELAY_MS) || 0
-const CONCURRENCY = parseInt(process.env.CONCURRENCY) || 20
+const CONCURRENCY = parseInt(process.env.CONCURRENCY) || 5
 
 const PROGRESS_FILE = new URL('./cross_sells_progress.txt', import.meta.url)
 
@@ -322,12 +322,14 @@ async function main() {
                     // Get internal goodSn from Vevor page, then fetch cross-sells via API
                     const internalGoodSn = await getInternalGoodSn(vevorUrl)
                     if (!internalGoodSn) {
+                        console.log(`  [${sku}] Skip: could not extract goodSn from ${vevorUrl}`)
                         skipCount++
                         return
                     }
 
                     const crossSellSkus = await fetchCrossSellSkus(internalGoodSn)
                     if (!crossSellSkus || crossSellSkus.length === 0) {
+                        console.log(`  [${sku}] Skip: no cross-sell data from Vevor API (goodSn: ${internalGoodSn})`)
                         skipCount++
                         return
                     }
@@ -343,6 +345,7 @@ async function main() {
                     ]
 
                     if (crossSellGids.length === 0) {
+                        console.log(`  [${sku}] Skip: ${crossSellSkus.length} cross-sell SKU(s) but none in our DB`)
                         skipCount++
                         return
                     }
@@ -359,6 +362,7 @@ async function main() {
                             : crossSellGids
 
                     if (filteredGids.length === 0) {
+                        console.log(`  [${sku}] Skip: all ${crossSellGids.length} cross-sell(s) already in compare`)
                         skipCount++
                         return
                     }
@@ -427,6 +431,10 @@ async function main() {
                         throw new Error(`Shopify GraphQL errors: ${JSON.stringify(result.errors)}`)
                     }
 
+                    const newCount = mergedGids.length - existingGids.length
+                    console.log(
+                        `  [${sku}] ✓ Cross-sells updated (${existingGids.length} existing + ${newCount} new = ${mergedGids.length} total)`
+                    )
                     successCount++
 
                     // Save progress
