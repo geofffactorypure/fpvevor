@@ -375,8 +375,29 @@ async function main() {
                         return
                     }
 
-                    // Update Shopify cross_sells metafield
+                    // Fetch existing cross_sells and merge (additive with dedup)
                     const productGid = admin_graphql_api_id || `gid://shopify/Product/${id}`
+                    const existingResult = await shopifyGraphQL(
+                        storeInfo,
+                        `query getProduct($id: ID!) {
+                            product(id: $id) {
+                                metafield(namespace: "custom", key: "cross_sells") {
+                                    value
+                                }
+                            }
+                        }`,
+                        { id: productGid }
+                    )
+                    let existingGids = []
+                    try {
+                        const raw = existingResult.data?.product?.metafield?.value
+                        if (raw) existingGids = JSON.parse(raw)
+                    } catch (e) {
+                        // ignore parse errors
+                    }
+                    const mergedGids = [...new Set([...existingGids, ...filteredGids])]
+
+                    // Update Shopify cross_sells metafield
                     const result = await shopifyGraphQL(
                         storeInfo,
                         `mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
@@ -391,7 +412,7 @@ async function main() {
                                     ownerId: productGid,
                                     namespace: 'custom',
                                     key: 'cross_sells',
-                                    value: JSON.stringify(filteredGids),
+                                    value: JSON.stringify(mergedGids),
                                     type: 'list.product_reference',
                                 },
                             ],
