@@ -10,14 +10,15 @@ import fs from 'fs'
 /**
  * Vevor Cross-Sells Scraper
  *
- * Scrapes the "Bought Together" section from Vevor product pages and updates
- * the custom.cross_sells metafield (list.product_reference) in Shopify.
+ * Scrapes the "People Who Viewed This Item Also Viewed" section from Vevor
+ * product pages and updates the custom.cross_sells metafield
+ * (list.product_reference) in Shopify.
  *
  * Flow:
  *   1. Fetch Vevor feed to get product links + SKUs
  *   2. Match SKUs to existing products via variants_new -> products
  *   3. For each product page, extract the internal goodSn identifier
- *   4. Call Vevor's /api/recommend/buy-and-buy API to get cross-sell goodSn values
+ *   4. Call Vevor's /api/recommend/look-and-look API to get cross-sell goodSn values
  *   5. Look up cross-sell SKUs in DB to get product GIDs
  *   6. Update Shopify custom.cross_sells metafield (list.product_reference)
  *
@@ -129,19 +130,18 @@ async function getInternalGoodSn(productUrl) {
 }
 
 /**
- * Fetch cross-sell SKUs (goodSn) from the Vevor buy-and-buy API.
+ * Fetch cross-sell SKUs (goodSn) from the Vevor look-and-look API ("also viewed").
  */
 async function fetchCrossSellSkus(internalGoodSn) {
     const params = new URLSearchParams({
         bizType: 'goods_detail',
         goodSn: internalGoodSn,
-        compType: 'bought',
-        btnCartType: '3',
+        compType: 'viewed',
         pipeline: 'US',
         lang: 'en',
     })
 
-    const res = await fetch(`https://www.vevor.com/api/recommend/buy-and-buy?${params}`, {
+    const res = await fetch(`https://www.vevor.com/api/recommend/look-and-look?${params}`, {
         headers: HEADERS,
         signal: AbortSignal.timeout(15000),
     })
@@ -379,27 +379,8 @@ async function main() {
                         return
                     }
 
-                    // Fetch existing cross_sells and merge (additive with dedup)
+                    // Overwrite cross_sells with new data
                     const productGid = admin_graphql_api_id || `gid://shopify/Product/${id}`
-                    const existingResult = await shopifyGraphQL(
-                        storeInfo,
-                        `query getProduct($id: ID!) {
-                            product(id: $id) {
-                                metafield(namespace: "custom", key: "cross_sells") {
-                                    value
-                                }
-                            }
-                        }`,
-                        { id: productGid }
-                    )
-                    let existingGids = []
-                    try {
-                        const raw = existingResult.data?.product?.metafield?.value
-                        if (raw) existingGids = JSON.parse(raw)
-                    } catch (e) {
-                        // ignore parse errors
-                    }
-                    const mergedGids = [...new Set([...existingGids, ...filteredGids])]
 
                     // Update Shopify cross_sells metafield
                     const result = await shopifyGraphQL(
@@ -416,7 +397,7 @@ async function main() {
                                     ownerId: productGid,
                                     namespace: 'custom',
                                     key: 'cross_sells',
-                                    value: JSON.stringify(mergedGids),
+                                    value: JSON.stringify(filteredGids),
                                     type: 'list.product_reference',
                                 },
                             ],
@@ -431,10 +412,7 @@ async function main() {
                         throw new Error(`Shopify GraphQL errors: ${JSON.stringify(result.errors)}`)
                     }
 
-                    const newCount = mergedGids.length - existingGids.length
-                    console.log(
-                        `  [${sku}] ✓ Cross-sells updated (${existingGids.length} existing + ${newCount} new = ${mergedGids.length} total)`
-                    )
+                    console.log(`  [${sku}] ✓ Cross-sells set (${filteredGids.length} products)`)
                     successCount++
 
                     // Save progress
