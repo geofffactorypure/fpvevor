@@ -148,9 +148,13 @@ async function fetchCrossSellSkus(internalGoodSn) {
     if (!res.ok) throw new Error(`API returned ${res.status}`)
     const data = await res.json()
 
-    if (data.status !== 0 || !data.data?.list?.length) return null
+    if (data.status !== 0) return null
 
-    const skus = data.data.list.map((item) => item.goodSn).filter((sn) => sn && sn.length > 0)
+    // look-and-look returns data as a direct array, not {list: [...]}
+    const items = Array.isArray(data.data) ? data.data : data.data?.list
+    if (!items?.length) return null
+
+    const skus = items.map((item) => item.goodSn).filter((sn) => sn && sn.length > 0)
     return skus.length > 0 ? skus : null
 }
 
