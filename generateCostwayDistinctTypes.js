@@ -1,7 +1,6 @@
 import 'dotenv/config'
 import fs from 'fs'
 import mysql from 'mysql'
-import { parse } from 'csv-parse'
 import { SESClient, SendRawEmailCommand } from '@aws-sdk/client-ses'
 
 const FEED_CACHE_FILE = './costway_data/feed_cache.csv'
@@ -59,13 +58,48 @@ function escapeCsv(val) {
     return str
 }
 
-async function readCostwayRows(filePath, onRow) {
-    const parser = fs
-        .createReadStream(filePath)
-        .pipe(parse({ columns: true, skip_empty_lines: true, relax_column_count: true }))
+function splitFirstN(line, n) {
+    const parts = []
+    let start = 0
+    for (let i = 0; i < line.length && parts.length < n; i++) {
+        if (line[i] === ',') {
+            parts.push(line.slice(start, i))
+            start = i + 1
+        }
+    }
+    parts.push(line.slice(start))
+    return parts
+}
 
-    for await (const row of parser) {
-        await onRow(row)
+function getCostwayTypeFromSuffix(suffix, column) {
+    const parts = suffix.split(',')
+    if (column === 'Category') return (parts[0] || '').trim()
+    if (column === 'Product Category') return (parts[1] || '').trim()
+    if (column === 'Type') return (parts[3] || '').trim()
+    return (parts[0] || '').trim()
+}
+
+function parseCostwayLine(line, categoryColumn) {
+    const vendorMarker = ',Costway,'
+    const vendorIdx = line.indexOf(vendorMarker)
+    if (vendorIdx === -1) return null
+
+    const prefix = line.slice(0, vendorIdx)
+    const suffix = line.slice(vendorIdx + vendorMarker.length)
+    if (!suffix) return null
+
+    const firstFields = splitFirstN(prefix, 3)
+    const handle = (firstFields[0] || '').trim()
+    const title = (firstFields[1] || '').trim()
+    const itemNo = (firstFields[2] || '').trim()
+
+    const fullType = getCostwayTypeFromSuffix(suffix, categoryColumn)
+    if (!fullType) return null
+
+    return {
+        sku: itemNo || handle,
+        title,
+        fullType,
     }
 }
 
@@ -154,11 +188,18 @@ async function main() {
         let totalRows = 0
         let usedRows = 0
 
-        await readCostwayRows(FEED_CACHE_FILE, async (row) => {
+        const feedCsv = fs.readFileSync(FEED_CACHE_FILE, 'utf8')
+        const lines = feedCsv.split('\n')
+
+        for (let i = 1; i < lines.length; i++) {
+            const line = lines[i].trim()
+            if (!line) continue
             totalRows++
 
-            const fullType = (row[CATEGORY_COLUMN] || '').trim()
-            if (!fullType) return
+            const parsed = parseCostwayLine(line, CATEGORY_COLUMN)
+            if (!parsed?.fullType) continue
+
+            const fullType = parsed.fullType
             usedRows++
 
             const segments = fullType
@@ -199,12 +240,12 @@ async function main() {
             }
 
             skuRows.push({
-                SKU: String(row['Variant SKU'] || '').trim(),
-                Title: String(row['Title'] || '').trim(),
+                SKU: parsed.sku,
+                Title: parsed.title,
                 'Costway Product Type': fullType,
                 'Mapped Product Type': mapped,
             })
-        })
+        }
 
         const sorted = [...resultMap.entries()].sort((a, b) => a[0].localeCompare(b[0]))
 

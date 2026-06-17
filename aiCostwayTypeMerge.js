@@ -2,7 +2,6 @@ import 'dotenv/config'
 import fs from 'fs'
 import mysql from 'mysql'
 import OpenAI from 'openai'
-import { parse } from 'csv-parse'
 import { SESClient, SendRawEmailCommand } from '@aws-sdk/client-ses'
 
 const FEED_CACHE_FILE = './costway_data/feed_cache.csv'
@@ -80,12 +79,28 @@ async function getDistinctCostwayTypes() {
     }
 
     const seen = new Set()
-    const parser = fs
-        .createReadStream(FEED_CACHE_FILE)
-        .pipe(parse({ columns: true, skip_empty_lines: true, relax_column_count: true }))
 
-    for await (const row of parser) {
-        const type = String(row[CATEGORY_COLUMN] || '').trim()
+    const feedCsv = fs.readFileSync(FEED_CACHE_FILE, 'utf8')
+    const lines = feedCsv.split('\n')
+
+    const getTypeFromSuffix = (suffix, column) => {
+        const parts = suffix.split(',')
+        if (column === 'Category') return (parts[0] || '').trim()
+        if (column === 'Product Category') return (parts[1] || '').trim()
+        if (column === 'Type') return (parts[3] || '').trim()
+        return (parts[0] || '').trim()
+    }
+
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim()
+        if (!line) continue
+
+        const vendorMarker = ',Costway,'
+        const vendorIdx = line.indexOf(vendorMarker)
+        if (vendorIdx === -1) continue
+
+        const suffix = line.slice(vendorIdx + vendorMarker.length)
+        const type = getTypeFromSuffix(suffix, CATEGORY_COLUMN)
         if (type) seen.add(type)
     }
 
