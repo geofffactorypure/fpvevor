@@ -148,7 +148,7 @@ async function sendSummaryEmail({ totalRows, usedRows, skuCount, distinctCount, 
         `--${boundary}--`,
     ].join('\r\n')
 
-    const ses = new SESClient({ region: process.env.AWS_REGION || 'us-east-1' })
+    const ses = new SESClient({ region: process.env.AWS_REGION || 'us-east-2' })
     await ses.send(new SendRawEmailCommand({ RawMessage: { Data: Buffer.from(rawMessage) } }))
     console.log(`Emailed CSVs to ${EMAIL_TO}`)
 }

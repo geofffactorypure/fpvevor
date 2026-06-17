@@ -167,7 +167,7 @@ async function sendResultEmail(csvContent) {
         `--${boundary}--`,
     ].join('\r\n')
 
-    const ses = new SESClient({ region: process.env.AWS_REGION || 'us-east-1' })
+    const ses = new SESClient({ region: process.env.AWS_REGION || 'us-east-2' })
     await ses.send(new SendRawEmailCommand({ RawMessage: { Data: Buffer.from(rawMessage) } }))
     console.log(`Emailed CSV to ${EMAIL_TO}`)
 }
