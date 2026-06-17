@@ -73,6 +73,51 @@ function escapeCsv(val) {
     return str
 }
 
+function splitFirstN(line, n) {
+    const parts = []
+    let start = 0
+    for (let i = 0; i < line.length && parts.length < n; i++) {
+        if (line[i] === ',') {
+            parts.push(line.slice(start, i))
+            start = i + 1
+        }
+    }
+    parts.push(line.slice(start))
+    return parts
+}
+
+function getCostwayTypeFromSuffix(suffix, column) {
+    const parts = suffix.split(',')
+    if (column === 'Category') return (parts[0] || '').trim()
+    if (column === 'Product Category') return (parts[1] || '').trim()
+    if (column === 'Type') return (parts[3] || '').trim()
+    return (parts[0] || '').trim()
+}
+
+function parseCostwayLine(line, categoryColumn) {
+    const vendorMarker = ',Costway,'
+    const vendorIdx = line.indexOf(vendorMarker)
+    if (vendorIdx === -1) return null
+
+    const prefix = line.slice(0, vendorIdx)
+    const suffix = line.slice(vendorIdx + vendorMarker.length)
+    if (!suffix) return null
+
+    const firstFields = splitFirstN(prefix, 3)
+    const handle = (firstFields[0] || '').trim()
+    const title = (firstFields[1] || '').trim()
+    const itemNo = (firstFields[2] || '').trim()
+
+    const fullType = getCostwayTypeFromSuffix(suffix, categoryColumn)
+    if (!fullType) return null
+
+    return {
+        sku: itemNo || handle,
+        title,
+        fullType,
+    }
+}
+
 async function getDistinctCostwayTypes() {
     if (!fs.existsSync(FEED_CACHE_FILE)) {
         throw new Error(`Missing feed cache: ${FEED_CACHE_FILE}`)
@@ -83,28 +128,58 @@ async function getDistinctCostwayTypes() {
     const feedCsv = fs.readFileSync(FEED_CACHE_FILE, 'utf8')
     const lines = feedCsv.split('\n')
 
-    const getTypeFromSuffix = (suffix, column) => {
-        const parts = suffix.split(',')
-        if (column === 'Category') return (parts[0] || '').trim()
-        if (column === 'Product Category') return (parts[1] || '').trim()
-        if (column === 'Type') return (parts[3] || '').trim()
-        return (parts[0] || '').trim()
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim()
+        if (!line) continue
+
+        const parsed = parseCostwayLine(line, CATEGORY_COLUMN)
+        if (parsed?.fullType) seen.add(parsed.fullType)
     }
+
+    return [...seen].sort()
+}
+
+function writeSkuMappingFromAi(costwayTypeToMappedType) {
+    const feedCsv = fs.readFileSync(FEED_CACHE_FILE, 'utf8')
+    const lines = feedCsv.split('\n')
+
+    const skuRows = []
 
     for (let i = 1; i < lines.length; i++) {
         const line = lines[i].trim()
         if (!line) continue
 
-        const vendorMarker = ',Costway,'
-        const vendorIdx = line.indexOf(vendorMarker)
-        if (vendorIdx === -1) continue
+        const parsed = parseCostwayLine(line, CATEGORY_COLUMN)
+        if (!parsed?.fullType) continue
 
-        const suffix = line.slice(vendorIdx + vendorMarker.length)
-        const type = getTypeFromSuffix(suffix, CATEGORY_COLUMN)
-        if (type) seen.add(type)
+        let mappedType = costwayTypeToMappedType.get(parsed.fullType)
+        if (!mappedType) {
+            const segments = parsed.fullType
+                .split('>')
+                .map((s) => s.trim())
+                .filter(Boolean)
+            mappedType = generateNewType(segments[segments.length - 1])
+        }
+        if (!mappedType) continue
+
+        skuRows.push({
+            SKU: parsed.sku,
+            Title: parsed.title,
+            'Costway Product Type': parsed.fullType,
+            'Mapped Product Type': mappedType,
+        })
     }
 
-    return [...seen].sort()
+    const headers = ['SKU,Title,Costway Product Type,Mapped Product Type']
+    for (const row of skuRows) {
+        headers.push(
+            [row.SKU, row.Title, row['Costway Product Type'], row['Mapped Product Type']].map(escapeCsv).join(',')
+        )
+    }
+
+    const csv = headers.join('\n')
+    fs.writeFileSync('costway_sku_type_mapping.csv', csv)
+    return { csv, count: skuRows.length }
 }
 
 function writeOutput(typeMap, ourTypes) {
@@ -137,13 +212,14 @@ function writeOutput(typeMap, ourTypes) {
     return csv
 }
 
-async function sendResultEmail(csvContent) {
+async function sendResultEmail(aiMergeCsvContent, skuMappingCsvContent) {
     if (!EMAIL_ENABLED) return
 
     const boundary = `----boundary_${Date.now().toString(16)}`
     const subject = 'Costway AI Product Type Merge CSV'
-    const bodyText = 'Attached is the Costway AI type merge output CSV.'
-    const base64Csv = Buffer.from(csvContent, 'utf8').toString('base64')
+    const bodyText = 'Attached are the Costway AI type merge and SKU type mapping CSV outputs.'
+    const base64MergeCsv = Buffer.from(aiMergeCsvContent, 'utf8').toString('base64')
+    const base64SkuCsv = Buffer.from(skuMappingCsvContent, 'utf8').toString('base64')
 
     const rawMessage = [
         `From: ${EMAIL_FROM}`,
@@ -162,7 +238,14 @@ async function sendResultEmail(csvContent) {
         'Content-Disposition: attachment; filename="costway_ai_type_merge.csv"',
         'Content-Transfer-Encoding: base64',
         '',
-        base64Csv,
+        base64MergeCsv,
+        '',
+        `--${boundary}`,
+        'Content-Type: text/csv; name="costway_sku_type_mapping.csv"',
+        'Content-Disposition: attachment; filename="costway_sku_type_mapping.csv"',
+        'Content-Transfer-Encoding: base64',
+        '',
+        base64SkuCsv,
         '',
         `--${boundary}--`,
     ].join('\r\n')
@@ -306,8 +389,17 @@ async function main() {
         }
 
         const finalCsv = writeOutput(typeMap, ourTypes)
-        await sendResultEmail(finalCsv)
+        const costwayTypeToMappedType = new Map()
+        for (const [mappedType, costwayTypes] of typeMap.entries()) {
+            for (const costwayType of costwayTypes) {
+                costwayTypeToMappedType.set(costwayType, mappedType)
+            }
+        }
+
+        const { csv: skuMappingCsv, count: skuCount } = writeSkuMappingFromAi(costwayTypeToMappedType)
+        await sendResultEmail(finalCsv, skuMappingCsv)
         console.log('Done! Final output written to costway_ai_type_merge.csv')
+        console.log(`Updated costway_sku_type_mapping.csv (${skuCount} rows)`)
     } finally {
         pool.end()
     }

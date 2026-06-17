@@ -16,7 +16,8 @@
     "find-new": "node findNewVevorSkus.js",
     "map-new": "node mapNewVevorSkus.js",
     "costway-types": "node generateCostwayDistinctTypes.js",
-    "costway-types-ai": "node aiCostwayTypeMerge.js"
+    "costway-types-ai": "node aiCostwayTypeMerge.js",
+    "costway-apply-ai": "node applyCostwayAiTypeMerge.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.0.0",
