@@ -277,12 +277,12 @@ function buildListingFromData(s3Data, productType, title) {
     let description = ''
     if (s3Data.texts?.description) {
         description = stripHtml(s3Data.texts.description)
-            .replace(/\n{2,}/g, '\n')
+            .replace(/(\s*\n\s*)+/g, '\n')
             .replace(/\n/g, '<br>')
     }
     if (!description && s3Data.texts?.short_description) {
         description = stripHtml(s3Data.texts.short_description)
-            .replace(/\n{2,}/g, '\n')
+            .replace(/(\s*\n\s*)+/g, '\n')
             .replace(/\n/g, '<br>')
     }
 
