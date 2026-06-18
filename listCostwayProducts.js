@@ -8,7 +8,7 @@ import sharp from 'sharp'
 import OpenAI from 'openai'
 import mysql from 'mysql'
 import { parse } from 'csv-parse/sync'
-import { S3 as AWSS3, GetObjectCommand } from '@aws-sdk/client-s3'
+import { S3 as AWSS3, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3'
 import { Upload } from '@aws-sdk/lib-storage'
 import jwt from 'jsonwebtoken'
 
@@ -104,6 +104,55 @@ async function fetchProductFromS3(fepId) {
         if (err.name === 'NoSuchKey') return null
         throw err
     }
+}
+
+async function fetchProductFromCostwayAPI(id, maxRetries = 5) {
+    const url = `https://www.costway.com/api/product/${id}`
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const res = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+                    Accept: 'application/json',
+                },
+            })
+            if (res.status === 429) {
+                const waitMs = Math.min(60000, Math.pow(2, attempt) * 1000)
+                console.log(`  ⏳ API 429 for ${id}, waiting ${waitMs}ms (attempt ${attempt}/${maxRetries})`)
+                await new Promise((r) => setTimeout(r, waitMs))
+                continue
+            }
+            if (!res.ok) return null
+            const payload = await res.json()
+            return payload?.result ?? null
+        } catch (err) {
+            if (attempt < maxRetries) {
+                await new Promise((r) => setTimeout(r, attempt * 1000))
+                continue
+            }
+            return null
+        }
+    }
+    return null
+}
+
+async function fetchProductWithFallback(id) {
+    const s3Data = await fetchProductFromS3(id)
+    if (s3Data) return s3Data
+    console.log(`  [S3 miss] Fetching ${id} from Costway API...`)
+    const apiData = await fetchProductFromCostwayAPI(id)
+    if (apiData) {
+        // Cache to S3 for future runs
+        await S3.send(
+            new PutObjectCommand({
+                Bucket: S3_BUCKET,
+                Key: `${S3_PRODUCT_PREFIX}/${id}`,
+                Body: JSON.stringify(apiData),
+                ContentType: 'application/json',
+            })
+        ).catch((err) => console.error(`  Failed to cache ${id} to S3: ${err.message}`))
+    }
+    return apiData
 }
 
 async function getS3Json(key) {
@@ -1297,7 +1346,7 @@ async function listOneParent({
         const variantInputs = []
         const media = []
         for (const { name, value, opt } of parsedOptions) {
-            const optionJson = await fetchProductFromS3(opt.product_id)
+            const optionJson = await fetchProductWithFallback(opt.product_id)
             const optSpecial = parseFloat(opt.special_price) || specialPrice
             const optOld = parseFloat(opt.old_special_price) || oldSpecialPrice
             const optCost = parseFloat((optSpecial * COSTWAY_DISCOUNT).toFixed(2))
