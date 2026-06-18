@@ -1312,12 +1312,14 @@ async function listOneParent({
                         return null
                     }
                 )
-                media.push({
-                    alt: optionJson?.gallery?.[0]?.alt,
-                    mediaContentType: 'IMAGE',
-                    originalSource: s3Url,
-                })
-                mediaSrc = s3Url
+                if (s3Url) {
+                    media.push({
+                        alt: optionJson?.gallery?.[0]?.alt,
+                        mediaContentType: 'IMAGE',
+                        originalSource: s3Url,
+                    })
+                    mediaSrc = s3Url
+                }
             }
 
             variantInputs.push({
