@@ -1171,7 +1171,11 @@ async function listOneParent({
             try {
                 let s3Url
                 if (i === 0) {
-                    s3Url = await removeFirstImageBackground([item.originalSource], STORE_ID).catch((err) => {
+                    const s3PreliminaryUrl = await uploadGalleryImage(item.originalSource, STORE_ID).catch((err) => {
+                        console.error(`[${parentSku}] Failed to upload image ${i}: ${err.message}`)
+                        return null
+                    })
+                    s3Url = await removeFirstImageBackground([s3PreliminaryUrl], STORE_ID).catch((err) => {
                         console.error(`[${parentSku}] BG removal failed for image 0: ${err.message}`)
                         return null
                     })
