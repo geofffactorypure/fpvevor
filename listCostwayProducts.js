@@ -1308,7 +1308,7 @@ async function listOneParent({
             if (optionJson?.gallery?.[0]?.original_image) {
                 const s3Url = await uploadGalleryImage(optionJson?.gallery?.[0]?.original_image, STORE_ID).catch(
                     (err) => {
-                        console.error(`[${parentSku}] Failed to upload image ${i}: ${err.message}`)
+                        console.error(`[${parentSku}] Failed to upload image: ${err.message}`)
                         return null
                     }
                 )
