@@ -24,6 +24,7 @@ const SHOPIFY_API_VERSION = '2026-01'
 
 const S3_BUCKET = 'fpdash-bucket'
 const S3_PRODUCT_PREFIX = 'costwaydata'
+const S3_PARENTS_PREFIX = 'costwaydata/configurableParents'
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_AI_LISTER_API_KEY })
 const S3 = new AWSS3({ region: 'us-east-1' })
@@ -105,6 +106,17 @@ async function fetchProductFromS3(fepId) {
     }
 }
 
+async function getS3Json(key) {
+    try {
+        const res = await S3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: key }))
+        const body = await res.Body.transformToString()
+        return JSON.parse(body)
+    } catch (err) {
+        if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404 || err.Code === 'NoSuchKey') return null
+        throw err
+    }
+}
+
 // ── Data Formatters ─────────────────────────────────────────────────────────
 function stripHtml(html) {
     if (!html) return ''
@@ -131,10 +143,20 @@ function parseSpecifications(specsHtml) {
     const rowRegex = /<tr[^>]*>\s*<td[^>]*>(.*?)<\/td>\s*<td[^>]*>(.*?)<\/td>\s*<\/tr>/gi
     let match
     while ((match = rowRegex.exec(specsHtml)) !== null) {
-        const key = stripHtml(match[1]).trim().replace(/\n/g, ' ')
-        const value = stripHtml(match[2]).trim().replace(/\n/g, ' ')
-        if (key && value) {
+        const key = stripHtml(match[1])
+            .trim()
+            .replace(/\n/g, ' ')
+            .replace(/[;:]+$/, '')
+            .trim()
+        const rawValue = stripHtml(match[2]).trim().replace(/\n/g, ' ')
+        // Strip leading colon/semicolon that Costway sometimes includes
+        const value = rawValue.replace(/^[;:\s]+/, '').trim()
+        if (!value) continue
+        if (key) {
             specs.push(`${key}::${value}`)
+        } else if (specs.length > 0) {
+            // Continuation row (empty key) — append to previous spec value
+            specs[specs.length - 1] += `, ${value}`
         }
     }
     return specs
@@ -143,7 +165,21 @@ function parseSpecifications(specsHtml) {
 function parseFeatures(keyFeaturesHtml) {
     if (!keyFeaturesHtml) return []
     const features = []
-    // Split by <br /> or bullet points
+    // Try splitting by <li> tags first
+    const liMatches = keyFeaturesHtml.match(/<li[^>]*>([\s\S]*?)<\/li>/gi)
+    if (liMatches && liMatches.length > 1) {
+        for (const li of liMatches) {
+            const cleaned = stripHtml(li)
+                .replace(/[\n\r]+/g, ' ')
+                .replace(/^[•●■▪\-–—]\s*/, '')
+                .trim()
+            if (cleaned.length > 10) {
+                features.push(cleaned)
+            }
+        }
+        return features
+    }
+    // Fall back to splitting by <br />
     const lines = keyFeaturesHtml
         .split(/<br\s*\/?>/gi)
         .map((line) => stripHtml(line).trim())
@@ -214,23 +250,38 @@ function extractFep(itemLink) {
     }
 }
 
+// Parse costway option field (string "Color: Black", object, or plain value)
+function parseOptionLabel(optionField) {
+    if (!optionField) return { name: 'Option', value: 'Default' }
+    if (typeof optionField === 'string') {
+        const colonIdx = optionField.indexOf(':')
+        if (colonIdx > 0) {
+            return {
+                name: optionField.substring(0, colonIdx).trim(),
+                value: optionField.substring(colonIdx + 1).trim(),
+            }
+        }
+        return { name: 'Option', value: optionField.trim() }
+    }
+    if (typeof optionField === 'object') {
+        if (optionField.label != null && optionField.value != null) {
+            return { name: String(optionField.label), value: String(optionField.value) }
+        }
+        const keys = Object.keys(optionField)
+        if (keys.length > 0) return { name: keys[0], value: String(optionField[keys[0]]) }
+    }
+    return { name: 'Option', value: String(optionField) }
+}
+
 // ── Prompts ─────────────────────────────────────────────────────────────────
 const titlePrompt = `Generate a product title and package contents for an authorized dealer listing.
 
 Title Rules:
-- If SKU is easily recitable (not random numbers/characters): [brand] [sku] [product type] [product title] New
-- Otherwise: [brand] [product type] [product title] New
-- The product type MUST appear immediately after the brand (or SKU if included) — this takes priority over SEO optimization
-- The remaining product title words can be SEO optimized and reordered, but product type placement is non-negotiable
+- [brand] [product title] [item_no] New
+- The product title words can be SEO optimized and reordered and lessened if needed
 - Truncate units: 'inches' to '"', 'feet' to "'", 'pounds' to 'lbs', etc.
 
-Package Contents Rules:
-- List what comes in the box as "Nx Item" entries (e.g. "1x Umbrella Base", "4x Mounting Bolts", "1x User Manual")
-- Use singular form for each item
-- If you can't determine contents from the product data, return just "1x [product type singular form]"
-
-Return ONLY valid JSON in this format, nothing else:
-{"title": "...", "packageContents": ["1x ...", "1x ..."]}
+{"title": "..."}
 
 Product Data:
 {PRODUCT_DATA}
@@ -287,7 +338,24 @@ function buildListingFromData(s3Data, productType, title) {
     }
 
     // Specifications from HTML table
-    const specifications = parseSpecifications(s3Data.texts?.specifications)
+    const allSpecifications = parseSpecifications(s3Data.texts?.specifications)
+
+    // Separate Package Includes rows from the rest of specs
+    const packageContents = []
+    const specifications = allSpecifications.filter((spec) => {
+        const sepIdx = spec.indexOf('::')
+        if (sepIdx === -1) return true
+        const key = spec.slice(0, sepIdx).trim()
+        if (/^package includes?$/i.test(key)) {
+            const value = spec.slice(sepIdx + 2)
+            value.split(',').forEach((item) => {
+                const trimmed = item.trim()
+                if (trimmed) packageContents.push(trimmed)
+            })
+            return false
+        }
+        return true
+    })
 
     // Features from key_features HTML
     const features = parseFeatures(s3Data.texts?.key_features)
@@ -314,9 +382,9 @@ function buildListingFromData(s3Data, productType, title) {
         Description: description,
         Warranty: warranty,
         Manuals: manuals,
-        PackageContents: [],
         Checkmarks: checkmarks,
         Specifications: specifications,
+        PackageContents: packageContents,
         Features: features,
         MetaDescription: metaDescription,
         Media: media,
@@ -450,12 +518,38 @@ async function uploadToS3({ image, store_id, fileName, contentType = 'image/png'
     return s3URL
 }
 
+async function fetchImageWithRetry(url, maxRetries = 4) {
+    let delay = 1000
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            const res = await fetch(url, {
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                signal: AbortSignal.timeout(15000),
+            })
+            if (res.ok) {
+                const buffer = Buffer.from(await res.arrayBuffer())
+                const contentType = res.headers.get('content-type')?.split(';')[0]?.trim() || 'image/jpeg'
+                return { buffer, contentType }
+            }
+            if (res.status === 429 && attempt < maxRetries) {
+                console.log(`  CDN 429, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})...`)
+                await new Promise((r) => setTimeout(r, delay))
+                delay *= 2
+                continue
+            }
+            throw new Error(`HTTP ${res.status}`)
+        } catch (err) {
+            if (attempt >= maxRetries) throw err
+            await new Promise((r) => setTimeout(r, delay))
+            delay *= 2
+        }
+    }
+}
+
 async function removeFirstImageBackground(imageUrls, store_id) {
     if (!imageUrls || imageUrls.length === 0) return
     const imageUrl = imageUrls[0]
-    const response = await fetch(imageUrl)
-    const arrayBuffer = await response.arrayBuffer()
-    const buffer = Buffer.from(arrayBuffer)
+    const { buffer } = await fetchImageWithRetry(imageUrl)
     let processedBuffer
     try {
         const imageBlob = await removeBackground(buffer)
@@ -482,11 +576,25 @@ async function removeFirstImageBackground(imageUrls, store_id) {
     })
 }
 
+async function uploadGalleryImage(url, store_id) {
+    const { buffer, contentType } = await fetchImageWithRetry(url)
+    const ext = contentType === 'image/png' ? '.png' : contentType === 'image/webp' ? '.webp' : '.jpg'
+    const rawFileName = url.split('/').pop().split('?')[0]
+    let decodedFileName
+    try {
+        decodedFileName = decodeURIComponent(rawFileName)
+    } catch {
+        decodedFileName = rawFileName
+    }
+    const formattedFileName = getFileNameWithTimestamp(decodedFileName, ext)
+    return uploadToS3({ image: buffer, store_id, fileName: formattedFileName, contentType })
+}
+
 // ── AI Generation (title only) ──────────────────────────────────────────────
 function buildProductDataForAI(s3Data, productType) {
     const data = {
         brand: 'Costway',
-        sku: s3Data.sku,
+        item_no: s3Data.item_no,
         product_type: productType,
         name: s3Data.name,
         description: stripHtml(s3Data.texts?.short_description || s3Data.texts?.description || ''),
@@ -508,13 +616,9 @@ async function generateListingObject({ s3Data, productType, additional_prompt })
     })
 
     let title = ''
-    let packageContents = [`1x ${productType}`]
     try {
         const parsed = JSON.parse(titleResponse.output_text.trim())
         title = parsed.title || ''
-        if (Array.isArray(parsed.packageContents) && parsed.packageContents.length > 0) {
-            packageContents = parsed.packageContents
-        }
     } catch {
         // Fallback: treat entire response as title (old behavior)
         title = titleResponse.output_text.trim().replace(/^["']|["']$/g, '')
@@ -523,10 +627,6 @@ async function generateListingObject({ s3Data, productType, additional_prompt })
 
     // Build the full listing object from data (no AI needed for these)
     const listing = buildListingFromData(s3Data, productType, title)
-    listing.PackageContents = packageContents
-
-    // Filter small images
-    listing.Media = await filterSmallImages(listing.Media)
 
     return listing
 }
@@ -610,7 +710,16 @@ async function getFileUrl(storeInfo, fileId) {
     return res.data.node.url
 }
 
-async function createShopifyProduct({ aiResult, product_type, title, vendor, sku, storeInfo, pool }) {
+async function createShopifyProduct({
+    aiResult,
+    product_type,
+    title,
+    vendor,
+    sku,
+    storeInfo,
+    pool,
+    productOptions = null,
+}) {
     const media =
         aiResult.Media?.map((m) => ({
             alt: m.alt,
@@ -677,16 +786,10 @@ async function createShopifyProduct({ aiResult, product_type, title, vendor, sku
 
     const uploadedManuals = manuals.filter((m) => m.url).map((m) => `${m.name}:${m.url}`)
 
-    const needsReview =
-        !aiResult.PackageContents ||
-        aiResult.PackageContents.length === 0 ||
-        (aiResult.Features || []).join('').length < 750 ||
-        uploadedManuals.length === 0 ||
-        !media.length
+    const needsReview = (aiResult.Features || []).join('').length < 750 || uploadedManuals.length === 0 || !media.length
 
     const tags = [
         needsReview ? 'Needs Review' : null,
-        !aiResult.PackageContents || aiResult.PackageContents.length === 0 ? 'Review: Package Contents' : null,
         (aiResult.Features || []).join('').length < 750 ? 'Review: Features' : null,
         uploadedManuals.length === 0 ? 'Review: Manuals' : null,
         !media.length ? 'Review: Images' : null,
@@ -700,6 +803,7 @@ async function createShopifyProduct({ aiResult, product_type, title, vendor, sku
         status: !media.length ? 'DRAFT' : 'ACTIVE',
         seo: { description: aiResult.MetaDescription },
         tags: ['new', 'AI Lister', ...tags.filter(Boolean)],
+        productOptions: productOptions || undefined,
         metafields: [
             {
                 namespace: 'custom',
@@ -715,12 +819,6 @@ async function createShopifyProduct({ aiResult, product_type, title, vendor, sku
             },
             {
                 namespace: 'custom',
-                key: 'package_contents',
-                value: JSON.stringify(aiResult.PackageContents.map((v) => v.replace(/[\n\r]+/g, ' ').trim())),
-                type: 'list.single_line_text_field',
-            },
-            {
-                namespace: 'custom',
                 key: 'checkmarks',
                 value: JSON.stringify(aiResult.Checkmarks.map((v) => v.replace(/[\n\r]+/g, ' ').trim())),
                 type: 'list.single_line_text_field',
@@ -731,6 +829,16 @@ async function createShopifyProduct({ aiResult, product_type, title, vendor, sku
                 value: JSON.stringify(aiResult.Specifications.map((v) => v.replace(/[\n\r]+/g, ' ').trim())),
                 type: 'list.single_line_text_field',
             },
+            ...(aiResult.PackageContents?.length
+                ? [
+                      {
+                          namespace: 'custom',
+                          key: 'package_contents',
+                          value: JSON.stringify(aiResult.PackageContents.map((v) => v.replace(/[\n\r]+/g, ' ').trim())),
+                          type: 'list.single_line_text_field',
+                      },
+                  ]
+                : []),
             {
                 namespace: 'custom',
                 key: 'features',
@@ -748,8 +856,8 @@ async function createShopifyProduct({ aiResult, product_type, title, vendor, sku
                 product {
                     id
                     title
-                    variants(first: 1) {
-                        nodes { id }
+                    variants(first: 100) {
+                        nodes { id selectedOptions { name value } }
                     }
                 }
                 userErrors { field message }
@@ -798,6 +906,32 @@ async function updateVariant(
     if (res.data.productVariantsBulkUpdate.userErrors.length > 0)
         throw new Error(`GraphQL user errors: ${JSON.stringify(res.data.productVariantsBulkUpdate.userErrors)}`)
     return res.data.productVariantsBulkUpdate
+}
+
+async function productVariantsBulkCreate(
+    { productId, variants, strategy = 'REMOVE_STANDALONE_VARIANT', media = [] },
+    storeInfo
+) {
+    const res = await shopifyGraphQL(
+        storeInfo,
+        `
+        mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $strategy: ProductVariantsBulkCreateStrategy, $media: [CreateMediaInput!]) {
+            productVariantsBulkCreate(productId: $productId, variants: $variants, strategy: $strategy, media: $media) {
+                productVariants {
+                    id
+                    title
+                    selectedOptions { name value }
+                }
+                userErrors { field message }
+            }
+        }
+        `,
+        { productId, variants, strategy, media }
+    )
+    if (res.errors) throw new Error(`GraphQL errors: ${JSON.stringify(res.errors)}`)
+    if (res.data.productVariantsBulkCreate.userErrors.length > 0)
+        throw new Error(`GraphQL user errors: ${JSON.stringify(res.data.productVariantsBulkCreate.userErrors)}`)
+    return res.data.productVariantsBulkCreate.productVariants
 }
 
 async function createListingEvent(pool, event) {
@@ -928,59 +1062,344 @@ async function generateFiltersForNewProduct({ pool, productId, productType, prod
     }
 }
 
-// ── Feed Parsing ────────────────────────────────────────────────────────────
-const FEED_CACHE_FILE = './costway_data/feed_cache.csv'
-
-function parseFeedRows() {
-    if (!fs.existsSync(FEED_CACHE_FILE)) {
-        throw new Error(`Missing feed cache: ${FEED_CACHE_FILE}. Run scrapeCostwayFeed.js first.`)
+// ── Per-parent listing ──────────────────────────────────────────────────────
+async function listOneParent({
+    parentId,
+    parentEntry,
+    skuToProductType,
+    listedSkuSet,
+    listedItemNoSet,
+    storeInfo,
+    publications,
+    additionalPrompt,
+    brandDefaults,
+    pool,
+}) {
+    // 1. Fetch parent product data from S3
+    const parentData = await fetchProductFromS3(parentId)
+    if (!parentData) {
+        console.log(`[parent:${parentId}] No S3 data found, skipping`)
+        return null
     }
 
-    const feedCsv = fs.readFileSync(FEED_CACHE_FILE, 'utf8')
-    const lines = feedCsv.split('\n')
-    const header = lines[0].split(',')
+    const parentSku = parentData.item_no || parentData.sku
+    const options = parentEntry.options || []
 
-    // Get column indices
-    const itemLinkIdx = header.indexOf('Item Link')
-    const itemNoIdx = header.indexOf('Item No')
-    const titleIdx = header.indexOf('Title')
-    const priceIdx = header.indexOf('Variant Price')
-    const comparePriceIdx = header.indexOf('Variant Compare At Price')
-    const inStockIdx = header.indexOf('1=In Stock|0=OOS')
+    // 2. Determine product type — try parentId directly (numeric entity ID), then parentSku, then each option SKU/product_id
+    let productType = skuToProductType.get(String(parentId)) || skuToProductType.get(parentSku)
+    if (!productType) {
+        for (const opt of options) {
+            productType = skuToProductType.get(String(opt.product_id)) || skuToProductType.get(opt.sku)
+            if (productType) break
+        }
+    }
+    if (!productType) {
+        console.log(`[parent:${parentId}] No product type mapping for ${parentSku || parentId}, skipping`)
+        return null
+    }
+    if (PRODUCT_TYPE_FILTER && productType !== PRODUCT_TYPE_FILTER) {
+        console.log(`[parent:${parentId}] Skipping type "${productType}" (filter: "${PRODUCT_TYPE_FILTER}")`)
+        return null
+    }
 
-    if (itemLinkIdx === -1) throw new Error('Could not find "Item Link" column in feed header')
+    // 3. Skip if already listed
+    if (listedSkuSet.has(parentSku) || listedItemNoSet.has(parentSku) || listedItemNoSet.has(String(parentId))) {
+        console.log(`[${parentSku}] Already listed, skipping`)
+        return null
+    }
+    if (options.some((o) => o.sku && listedSkuSet.has(o.sku))) {
+        console.log(`[${parentSku}] Variant already listed, skipping`)
+        return null
+    }
 
-    const rows = []
-    const seen = new Set()
+    const isConfigurable = options.length > 1
 
-    for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim()
-        if (!line) continue
+    if (!isConfigurable) {
+        return
+    }
 
-        const fields = line.split(',')
-        const fep = extractFep(fields[itemLinkIdx])
-        if (!fep || seen.has(fep)) continue
-        seen.add(fep)
+    // 4. Parse option groups for configurable products
+    let productOptions = null
+    let parsedOptions = [] // [{name, value, opt}]
 
-        const itemNo = (fields[itemNoIdx] || '').trim()
-        const title = (fields[titleIdx] || '').trim()
-        const price = (fields[priceIdx] || '').trim()
-        const comparePrice = (fields[comparePriceIdx] || '').trim()
-        const inStock = (fields[inStockIdx] || '').trim()
-        const itemLink = (fields[itemLinkIdx] || '').trim()
+    if (isConfigurable) {
+        productOptions = parseProductOptions(options)
+        parsedOptions = parseVariantOptions(options)
+    }
 
-        rows.push({
-            fep,
-            itemNo,
-            title,
-            price: parseFloat(price) || 0,
-            comparePrice: parseFloat(comparePrice) || 0,
-            inStock: inStock === '1',
-            itemLink,
+    // 5. Pricing — first option or parent data
+    const firstOpt = options[0] || {}
+    const specialPrice =
+        parseFloat(firstOpt.special_price) ||
+        parseFloat(parentData.price?.special_price) ||
+        parseFloat(parentData.price?.final_price) ||
+        0
+    const oldSpecialPrice = parseFloat(firstOpt.old_special_price) || parseFloat(parentData.price?.price) || 0
+    const cost = parseFloat((specialPrice * COSTWAY_DISCOUNT).toFixed(2))
+    const price = parseFloat((specialPrice > 0 ? specialPrice - 1 : 0).toFixed(2))
+    const compareAtPrice =
+        oldSpecialPrice && oldSpecialPrice > specialPrice ? parseFloat((oldSpecialPrice - 1).toFixed(2)) : null
+
+    const productUrl = parentData.url_path
+        ? `https://www.costway.com/${parentData.url_path}`
+        : `https://www.costway.com/api/product/${parentId}`
+
+    console.log(`[${parentSku}] Starting... (parent: ${parentId}, ${options.length} variant(s), type: ${productType})`)
+
+    // 6. Generate AI listing from parent data
+    const aiResult = await generateListingObject({
+        s3Data: parentData,
+        productType,
+        additional_prompt: additionalPrompt,
+    })
+    console.log(`[${parentSku}] AI Title: ${aiResult.Title}`)
+
+    // 7. Apply brand defaults
+    if (brandDefaults) {
+        if (brandDefaults.checkmarks?.length) aiResult.Checkmarks = brandDefaults.checkmarks
+        if (brandDefaults.warranty?.length) aiResult.Warranty = brandDefaults.warranty
+        if (brandDefaults.manuals?.length) aiResult.Manuals = brandDefaults.manuals
+    }
+
+    // 8. Upload all gallery images to S3 (first image gets background removed)
+    const originalImageCount = aiResult.Media?.length || 0
+    if (originalImageCount > 0) {
+        console.log(`[${parentSku}] Uploading ${originalImageCount} image(s) to S3...`)
+        const uploadedMedia = []
+        for (let i = 0; i < originalImageCount; i++) {
+            const item = aiResult.Media[i]
+            try {
+                let s3Url
+                if (i === 0) {
+                    s3Url = await removeFirstImageBackground([item.originalSource], STORE_ID).catch((err) => {
+                        console.error(`[${parentSku}] BG removal failed for image 0: ${err.message}`)
+                        return null
+                    })
+                } else {
+                    s3Url = await uploadGalleryImage(item.originalSource, STORE_ID).catch((err) => {
+                        console.error(`[${parentSku}] Failed to upload image ${i}: ${err.message}`)
+                        return null
+                    })
+                }
+                if (s3Url) uploadedMedia.push({ ...item, originalSource: s3Url })
+            } catch (err) {
+                console.error(`[${parentSku}] Unexpected error processing image ${i}: ${err.message}`)
+            }
+        }
+        aiResult.Media = uploadedMedia
+        console.log(`[${parentSku}] ✓ ${uploadedMedia.length}/${originalImageCount} image(s) uploaded to S3`)
+    }
+
+    // 9. Create Shopify product (with productOptions for configurable)
+    const createResponse = await createShopifyProduct({
+        aiResult,
+        product_type: productType,
+        vendor: 'Costway',
+        sku: parentSku,
+        storeInfo,
+        pool,
+        productOptions,
+    })
+
+    if (createResponse.data?.productCreate?.userErrors?.length > 0) {
+        console.error(`[${parentSku}] Shopify errors:`, createResponse.data.productCreate.userErrors)
+        throw new Error('Shopify product creation failed')
+    }
+
+    const createdProduct = createResponse.data?.productCreate?.product
+    if (!createdProduct) {
+        console.error(`[${parentSku}] No product returned:`, JSON.stringify(createResponse))
+        throw new Error('No product returned from Shopify')
+    }
+
+    console.log(`[${parentSku}] ✓ Created: ${createdProduct.title} (${createdProduct.id})`)
+
+    // Insert stripped product row for FK constraints
+    const numericProductId = parseInt(createdProduct.id.split('/').pop())
+    await query(
+        pool,
+        `INSERT IGNORE INTO products (id, title, product_type, vendor, status, store_id, custom_specifications, custom_features)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            numericProductId,
+            createdProduct.title,
+            productType,
+            'Costway',
+            'draft',
+            STORE_ID,
+            JSON.stringify(aiResult.Specifications || []),
+            JSON.stringify(aiResult.Features || []),
+        ]
+    ).catch((err) => console.error(`[${parentSku}] Failed to insert stripped product row:`, err.message))
+
+    // Publish to sales channels
+    if (publications.length > 0) {
+        await publishProduct(createdProduct.id, publications, storeInfo).catch((err) =>
+            console.error(`[${parentSku}] Failed to publish:`, err.message)
+        )
+        console.log(`[${parentSku}] ✓ Published to ${publications.length} sales channel(s)`)
+    }
+
+    // 10. Variant setup
+    if (!isConfigurable) {
+        // Simple product — update the single auto-created variant
+        const variantGid = createdProduct.variants?.nodes?.[0]?.id
+        if (variantGid) {
+            const itemNo = firstOpt.sku || parentSku
+            await updateVariant(
+                {
+                    productGid: createdProduct.id,
+                    variantGid,
+                    price: String(price),
+                    compareAtPrice: compareAtPrice ? String(compareAtPrice) : null,
+                    unit_cost: String(cost),
+                    sku: itemNo,
+                    barcode: '',
+                    tracked: true,
+                    metafields: [
+                        { namespace: 'custom', key: 'supplier_sku', value: itemNo, type: 'single_line_text_field' },
+                        {
+                            namespace: 'custom',
+                            key: 'part_number',
+                            value: parentData.item_no,
+                            type: 'single_line_text_field',
+                        },
+                        {
+                            namespace: 'custom',
+                            key: 'projected_unit_cost',
+                            value: String(cost),
+                            type: 'single_line_text_field',
+                        },
+                        {
+                            namespace: 'custom',
+                            key: 'projected_price',
+                            value: String(price),
+                            type: 'single_line_text_field',
+                        },
+                        {
+                            namespace: 'custom',
+                            key: 'weblinks',
+                            value: JSON.stringify([{ link: productUrl, title: 'Manufacturer Website' }]),
+                            type: 'json',
+                        },
+                    ],
+                },
+                storeInfo
+            )
+            console.log(`[${parentSku}] ✓ Variant updated (${itemNo})`)
+        }
+    } else {
+        // Configurable — bulk-create all variants, removing the default stub
+        const variantInputs = []
+        const media = []
+        for (const { name, value, opt } of parsedOptions) {
+            const optionJson = await fetchProductFromS3(opt.product_id)
+            const optSpecial = parseFloat(opt.special_price) || specialPrice
+            const optOld = parseFloat(opt.old_special_price) || oldSpecialPrice
+            const optCost = parseFloat((optSpecial * COSTWAY_DISCOUNT).toFixed(2))
+            const optPrice = parseFloat((optSpecial > 0 ? optSpecial - 1 : 0).toFixed(2))
+            const optCompare = optOld && optOld > optSpecial ? parseFloat((optOld - 1).toFixed(2)) : null
+            const itemNo = opt.sku || parentSku
+            let mediaSrc
+            if (optionJson?.gallery?.[0]?.original_image) {
+                const s3Url = await uploadGalleryImage(optionJson?.gallery?.[0]?.original_image, STORE_ID).catch(
+                    (err) => {
+                        console.error(`[${parentSku}] Failed to upload image ${i}: ${err.message}`)
+                        return null
+                    }
+                )
+                media.push({
+                    alt: optionJson?.gallery?.[0]?.alt,
+                    mediaContentType: 'IMAGE',
+                    originalSource: s3Url,
+                })
+                mediaSrc = s3Url
+            }
+
+            variantInputs.push({
+                mediaSrc,
+                price: String(optPrice),
+                ...(optCompare ? { compareAtPrice: String(optCompare) } : {}),
+                barcode: '',
+                taxable: true,
+                inventoryItem: { sku: itemNo, cost: String(optCost), tracked: true },
+                optionValues: [{ optionName: name, name: value }],
+                metafields: [
+                    { namespace: 'custom', key: 'supplier_sku', value: itemNo, type: 'single_line_text_field' },
+                    {
+                        namespace: 'custom',
+                        key: 'part_number',
+                        value: parentData.item_no,
+                        type: 'single_line_text_field',
+                    },
+                    {
+                        namespace: 'custom',
+                        key: 'projected_unit_cost',
+                        value: String(optCost),
+                        type: 'single_line_text_field',
+                    },
+                    {
+                        namespace: 'custom',
+                        key: 'projected_price',
+                        value: String(optPrice),
+                        type: 'single_line_text_field',
+                    },
+                    {
+                        namespace: 'custom',
+                        key: 'weblinks',
+                        value: JSON.stringify([{ link: productUrl, title: 'Manufacturer Website' }]),
+                        type: 'json',
+                    },
+                ],
+            })
+        }
+
+        const createdVariants = await productVariantsBulkCreate(
+            {
+                productId: createdProduct.id,
+                variants: variantInputs,
+                strategy: 'REMOVE_STANDALONE_VARIANT',
+                media: media.length > 0 ? media : undefined,
+            },
+            storeInfo
+        )
+        console.log(`[${parentSku}] ✓ Created ${createdVariants.length} variant(s)`)
+    }
+
+    // Record listing event
+    await createListingEvent(pool, {
+        product_id: numericProductId,
+        event_type: 'PRODUCT_LISTED',
+        event_data: JSON.stringify({
+            source: 'AI_LISTER_SCRIPT_V2',
+            sku: parentSku,
+            item_no: parentSku,
+            product_type: productType,
+            price: String(price),
+            unit_cost: String(cost),
+            parent_id: parentId,
+            variant_count: options.length,
+        }),
+        store_id: STORE_ID,
+    }).catch((err) => console.error(`[${parentSku}] Failed to create listing event:`, err.message))
+
+    // Generate AI filters
+    await generateFiltersForNewProduct({
+        pool,
+        productId: numericProductId,
+        productType,
+        productData: {
+            title: createdProduct.title,
+            specifications: aiResult.Specifications,
+            features: aiResult.Features,
+        },
+    })
+        .then((result) => {
+            if (result) console.log(`[${parentSku}] ✓ Generated ${result.length} filter values`)
         })
-    }
+        .catch((err) => console.error(`[${parentSku}] Failed to generate filters:`, err.message))
 
-    return rows
+    return { sku: parentSku, productId: createdProduct.id }
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -988,7 +1407,7 @@ async function main() {
     const pool = createPool()
 
     try {
-        // 1. Load the SKU -> product type mapping
+        // 1. Load SKU → product type mapping
         console.log('Loading Costway SKU type mapping...')
         const mappingPath = new URL('./costway_sku_type_mapping.csv', import.meta.url)
         if (!fs.existsSync(mappingPath)) {
@@ -1004,54 +1423,36 @@ async function main() {
         for (const row of mappingRows) {
             const mappedType = row['Mapped Product Type']?.trim()
             const sku = row['SKU']?.trim()
-            if (mappedType && sku && (!PRODUCT_TYPE_FILTER || mappedType === PRODUCT_TYPE_FILTER)) {
-                skuToProductType.set(sku, mappedType)
-            }
+            if (mappedType && sku) skuToProductType.set(sku, mappedType)
         }
         console.log(
-            `Found ${skuToProductType.size} SKUs mapped${PRODUCT_TYPE_FILTER ? ` to "${PRODUCT_TYPE_FILTER}"` : ' (all types)'}`
+            `Found ${skuToProductType.size} SKUs mapped${PRODUCT_TYPE_FILTER ? ` (filtering to "${PRODUCT_TYPE_FILTER}")` : ' (all types)'}`
         )
         if (skuToProductType.size === 0) {
             console.log('No SKUs found. Exiting.')
             return
         }
 
-        // 2. Parse the Costway feed
-        console.log('Parsing Costway feed...')
-        const feedRows = parseFeedRows()
-        console.log(`Feed has ${feedRows.length} unique products`)
-
-        // 3. Filter feed rows to matching SKUs (exclude already-listed)
+        // 2. Load listed SKUs and item_nos from DB
         console.log('Loading listed Costway SKUs from database...')
         const listedSkuRows = await query(
             pool,
             `SELECT vn.sku FROM variants_new vn JOIN products p ON p.id = vn.product_id WHERE p.vendor = 'Costway' AND vn.sku IS NOT NULL`
         )
         const listedSkuSet = new Set(listedSkuRows.map((r) => r.sku))
-        // Also load listed item numbers from listing events to handle sku format change
         const listedEventRows = await query(
             pool,
             `SELECT JSON_UNQUOTE(JSON_EXTRACT(event_data, '$.item_no')) as item_no FROM product_listing_events WHERE store_id = ? AND event_type = 'PRODUCT_LISTED' AND JSON_EXTRACT(event_data, '$.item_no') IS NOT NULL`,
             [STORE_ID]
         ).catch(() => [])
         const listedItemNoSet = new Set(listedEventRows.map((r) => r.item_no).filter(Boolean))
+        console.log(`${listedSkuSet.size} SKUs and ${listedItemNoSet.size} item_nos already listed`)
 
-        const matchingProducts = feedRows.filter((row) => {
-            return skuToProductType.has(row.itemNo) && !listedSkuSet.has(row.itemNo) && !listedItemNoSet.has(row.itemNo)
-        })
-        console.log(
-            `Found ${matchingProducts.length} unlisted products in feed${PRODUCT_TYPE_FILTER ? ` matching "${PRODUCT_TYPE_FILTER}"` : ''} (${listedSkuSet.size} SKUs excluded as already listed)`
-        )
-        if (matchingProducts.length === 0) {
-            console.log('No matching products found in feed. Exiting.')
-            return
-        }
-
-        // 4. Get store info
+        // 3. Get store info
         const storeInfo = await getStoreInfo(pool)
         console.log(`Using store: ${storeInfo.shopify_name}`)
 
-        // 5. Get brand-specific AI lister prompt
+        // 4. Get brand-specific AI lister prompt
         let additionalPrompt = null
         try {
             const promptRows = await getAiListerPrompt(pool, 'Costway')
@@ -1063,7 +1464,7 @@ async function main() {
             console.warn('Could not load AI lister brand prompt:', err.message)
         }
 
-        // 6. Get brand-level product setup defaults
+        // 5. Get brand-level product setup defaults
         let brandDefaults = null
         try {
             const [defaults] = await getProductSetupDefaults(pool, 'Costway')
@@ -1087,225 +1488,102 @@ async function main() {
             console.warn('Could not load brand defaults:', err.message)
         }
 
-        // 7. Get publications (sales channels)
+        // 6. Get publications (sales channels)
         const publications = await getPublications(storeInfo).catch((err) => {
             console.error('Failed to retrieve publications:', err.message)
             return []
         })
         console.log(`Found ${publications.length} sales channel(s)`)
 
-        // 8. List products
-        const toList = matchingProducts.slice(0, LIMIT)
-        console.log(`\nListing ${toList.length} product(s) with concurrency ${CONCURRENCY}...\n`)
+        // 7. Iterate S3 configurable parent batches
+        let batchIndex = 0
+        let totalListed = 0
+        let totalFailed = 0
+        let batchesWithNoProgress = 0
+        const MAX_BATCHES_NO_PROGRESS = 5
 
-        let successCount = 0
-        let failCount = 0
+        console.log(`\nListing up to ${LIMIT} product(s) with concurrency ${CONCURRENCY}...\n`)
 
-        async function listOneProduct(row) {
-            const itemNo = row.itemNo
-            const fepId = row.fep
-            const productUrl = getProductUrl(row.itemLink)
-            const productType = skuToProductType.get(itemNo)
+        while (totalListed < LIMIT) {
+            const batchKey = `${S3_PARENTS_PREFIX}/${batchIndex * 100}`
+            const batch = await getS3Json(batchKey)
 
-            console.log(`[${itemNo}] Starting... (fep: ${fepId})`)
-
-            // Fetch product data from S3
-            const s3Data = await fetchProductFromS3(fepId)
-            if (!s3Data) {
-                throw new Error(`No S3 data found for fep ${fepId}. Run scrapeCostwayFeed.js first.`)
+            if (!batch) {
+                console.log(`No more parent batches found at index ${batchIndex} (${batchKey}). Done.`)
+                break
             }
 
-            // Use s3Data.sku as the product SKU (e.g. "OP2263")
-            const sku = s3Data.sku || itemNo
+            const parentIds = Object.keys(batch)
+            console.log(`Batch ${batchIndex} (${batchKey}): ${parentIds.length} parent(s)`)
+            batchIndex++
 
-            // Pricing from S3 data: special_price determines cost, final_price - $1 = list price, price.price = compare at
-            const s3Price = s3Data.price || {}
-            const specialPrice = parseFloat(s3Price.special_price) || parseFloat(s3Price.final_price) || row.price
-            const finalPrice = parseFloat(s3Price.final_price) || specialPrice
-            const regularPrice = parseFloat(s3Price.price) || 0
-            const cost = parseFloat((specialPrice * COSTWAY_DISCOUNT).toFixed(2))
-            const price = parseFloat((finalPrice - 1).toFixed(2))
-            const compareAtPrice =
-                regularPrice && regularPrice > finalPrice ? parseFloat((regularPrice - 1).toFixed(2)) : null
-
-            // Generate listing via OpenAI (no web search needed)
-            const aiResult = await generateListingObject({
-                s3Data,
-                productType,
-                additional_prompt: additionalPrompt,
-            })
-            console.log(`[${sku}] AI Title: ${aiResult.Title}`)
-
-            // Apply brand defaults
-            if (brandDefaults) {
-                if (brandDefaults.checkmarks?.length) aiResult.Checkmarks = brandDefaults.checkmarks
-                if (brandDefaults.warranty?.length) aiResult.Warranty = brandDefaults.warranty
-                if (brandDefaults.manuals?.length) aiResult.Manuals = brandDefaults.manuals
-            }
-
-            // Remove background from first image
-            const firstImageUrl = await removeFirstImageBackground(
-                aiResult.Media?.map((m) => m.originalSource),
-                STORE_ID
-            ).catch((err) => {
-                console.error(`[${sku}] Failed to remove background: ${err.message}`)
-                return null
-            })
-            if (aiResult.Media?.[0] && firstImageUrl) {
-                aiResult.Media[0].originalSource = firstImageUrl
-            }
-
-            // Create product on Shopify
-            const createResponse = await createShopifyProduct({
-                aiResult,
-                product_type: productType,
-                vendor: 'Costway',
-                sku,
-                storeInfo,
-                pool,
+            // Filter to parents not yet listed
+            const candidates = parentIds.filter((id) => {
+                if (listedItemNoSet.has(String(id))) return false
+                const opts = batch[id].options || []
+                if (opts.some((o) => o.sku && listedSkuSet.has(o.sku))) return false
+                return true
             })
 
-            if (createResponse.data?.productCreate?.userErrors?.length > 0) {
-                console.error(`[${sku}] Shopify errors:`, createResponse.data.productCreate.userErrors)
-                throw new Error('Shopify product creation failed')
+            if (candidates.length === 0) {
+                console.log('  All parents in this batch already listed, skipping...')
+                batchesWithNoProgress++
+                if (batchesWithNoProgress >= MAX_BATCHES_NO_PROGRESS) {
+                    console.log(`No progress after ${MAX_BATCHES_NO_PROGRESS} consecutive batches. Done.`)
+                    break
+                }
+                continue
             }
 
-            const createdProduct = createResponse.data?.productCreate?.product
-            if (!createdProduct) {
-                console.error(`[${sku}] No product returned:`, JSON.stringify(createResponse))
-                throw new Error('No product returned from Shopify')
-            }
+            const toList = candidates
+            console.log(`  ${toList.length} candidate(s) to attempt this batch`)
 
-            console.log(`[${sku}] ✓ Created: ${createdProduct.title} (${createdProduct.id})`)
+            const listedBefore = totalListed
 
-            // Insert stripped product row so FK constraints are satisfied before webhook sync
-            const numericProductId = parseInt(createdProduct.id.split('/').pop())
-            await query(
-                pool,
-                `INSERT IGNORE INTO products (id, title, product_type, vendor, status, store_id, custom_specifications, custom_features)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                    numericProductId,
-                    createdProduct.title,
-                    productType,
-                    'Costway',
-                    'draft',
-                    STORE_ID,
-                    JSON.stringify(aiResult.Specifications || []),
-                    JSON.stringify(aiResult.Features || []),
-                ]
-            ).catch((err) => {
-                console.error(`[${sku}] Failed to insert stripped product row:`, err.message)
-            })
+            for (let i = 0; i < toList.length; i += CONCURRENCY) {
+                const chunk = toList.slice(i, i + CONCURRENCY)
+                const chunkNum = Math.floor(i / CONCURRENCY) + 1
+                const totalChunks = Math.ceil(toList.length / CONCURRENCY)
+                console.log(`\n── Chunk ${chunkNum}/${totalChunks} (${chunk.length} products) ──\n`)
 
-            // Publish to sales channels
-            if (publications.length > 0) {
-                await publishProduct(createdProduct.id, publications, storeInfo).catch((err) => {
-                    console.error(`[${sku}] Failed to publish to sales channels:`, err.message)
-                })
-                console.log(`[${sku}] ✓ Published to ${publications.length} sales channel(s)`)
-            }
-
-            // Update variant with price, cost, SKU, metafields
-            const variantGid = createdProduct.variants?.nodes?.[0]?.id
-            if (variantGid) {
-                await updateVariant(
-                    {
-                        productGid: createdProduct.id,
-                        variantGid,
-                        price: String(price),
-                        compareAtPrice: compareAtPrice ? String(compareAtPrice) : null,
-                        unit_cost: String(cost),
-                        sku,
-                        barcode: '',
-                        tracked: true,
-                        metafields: [
-                            {
-                                namespace: 'custom',
-                                key: 'supplier_sku',
-                                value: sku,
-                                type: 'single_line_text_field',
-                            },
-                            {
-                                namespace: 'custom',
-                                key: 'projected_unit_cost',
-                                value: String(cost),
-                                type: 'single_line_text_field',
-                            },
-                            {
-                                namespace: 'custom',
-                                key: 'projected_price',
-                                value: String(price),
-                                type: 'single_line_text_field',
-                            },
-                            {
-                                namespace: 'custom',
-                                key: 'weblinks',
-                                value: JSON.stringify([{ link: productUrl, title: 'Manufacturer Website' }]),
-                                type: 'json',
-                            },
-                        ],
-                    },
-                    storeInfo
+                const results = await Promise.allSettled(
+                    chunk.map((parentId) =>
+                        listOneParent({
+                            parentId,
+                            parentEntry: batch[parentId],
+                            skuToProductType,
+                            listedSkuSet,
+                            listedItemNoSet,
+                            storeInfo,
+                            publications,
+                            additionalPrompt,
+                            brandDefaults,
+                            pool,
+                        })
+                    )
                 )
-                console.log(`[${sku}] ✓ Variant updated`)
+                for (const r of results) {
+                    if (r.status === 'fulfilled' && r.value) {
+                        totalListed++
+                        batchesWithNoProgress = 0
+                    } else if (r.status === 'rejected') {
+                        totalFailed++
+                        console.error('Product failed:', r.reason?.message || r.reason)
+                    }
+                }
             }
 
-            // Record listing event
-            await createListingEvent(pool, {
-                product_id: createdProduct.id.split('/').pop(),
-                event_type: 'PRODUCT_LISTED',
-                event_data: JSON.stringify({
-                    source: 'AI_LISTER_SCRIPT',
-                    sku,
-                    item_no: itemNo,
-                    product_type: productType,
-                    price: String(price),
-                    unit_cost: String(cost),
-                    fep_id: fepId,
-                }),
-                store_id: STORE_ID,
-            }).catch((err) => {
-                console.error(`[${sku}] Failed to create listing event:`, err.message)
-            })
-
-            // Generate AI filters if filter groups exist for this product type
-            await generateFiltersForNewProduct({
-                pool,
-                productId: numericProductId,
-                productType,
-                productData: {
-                    title: createdProduct.title,
-                    specifications: aiResult.Specifications,
-                    features: aiResult.Features,
-                },
-            })
-                .then((result) => {
-                    if (result) console.log(`[${sku}] ✓ Generated ${result.length} filter values`)
-                })
-                .catch((err) => {
-                    console.error(`[${sku}] Failed to generate filters:`, err.message)
-                })
-        }
-
-        // Process in batches of CONCURRENCY
-        for (let i = 0; i < toList.length; i += CONCURRENCY) {
-            const batch = toList.slice(i, i + CONCURRENCY)
-            const batchNum = Math.floor(i / CONCURRENCY) + 1
-            const totalBatches = Math.ceil(toList.length / CONCURRENCY)
-            console.log(`\n── Batch ${batchNum}/${totalBatches} (${batch.length} products) ──\n`)
-
-            const results = await Promise.allSettled(batch.map((row) => listOneProduct(row)))
-            for (const r of results) {
-                if (r.status === 'fulfilled') successCount++
-                else {
-                    failCount++
-                    console.error('Product failed:', r.reason?.message || r.reason)
+            if (totalListed === listedBefore) {
+                // Nothing was listed from this batch (all skipped)
+                batchesWithNoProgress++
+                if (batchesWithNoProgress >= MAX_BATCHES_NO_PROGRESS) {
+                    console.log(`No progress after ${MAX_BATCHES_NO_PROGRESS} consecutive batches. Done.`)
+                    break
                 }
             }
         }
 
-        console.log(`\n✓ Done! ${successCount} succeeded, ${failCount} failed.`)
+        console.log(`\n✓ Done! ${totalListed} listed, ${totalFailed} failed.`)
     } finally {
         pool.end()
     }
@@ -1315,3 +1593,41 @@ main().catch((err) => {
     console.error('Fatal error:', err)
     process.exit(1)
 })
+function parseProductOptions(relations) {
+    const options = []
+
+    for (const relation of relations) {
+        for (const key in relation.option) {
+            let foundOption = options.find((o) => o.name === key)
+
+            if (!foundOption) {
+                foundOption = {
+                    name: key,
+                    values: [],
+                }
+                options.push(foundOption)
+            }
+
+            const value = relation.option[key].option_value
+
+            if (!foundOption.values.some((v) => v.name === value)) {
+                foundOption.values.push({ name: value })
+            }
+        }
+    }
+
+    return options
+}
+
+function parseVariantOptions(relations) {
+    return relations.map((relation) => {
+        const key = Object.keys(relation.option)[0]
+        const value = relation.option[key].option_value
+
+        return {
+            name: key,
+            value,
+            opt: relation,
+        }
+    })
+}
