@@ -1664,10 +1664,8 @@ function parseProductOptions(relations) {
             }
 
             const value = relation.option[key].option_value
-
-            if (!foundOption.values.some((v) => v.name === value)) {
-                foundOption.values.push({ name: value })
-            }
+            const duplicates = foundOption.values.filter((v) => v.name === value)
+            foundOption.values.push({ name: value + (duplicates.length > 0 ? ` (${duplicates.length + 1})` : '') })
         }
     }
 
