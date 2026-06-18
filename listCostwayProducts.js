@@ -1565,7 +1565,8 @@ async function main() {
 
             if (!batch) {
                 console.log(`No more parent batches found at index ${batchIndex} (${batchKey}). Done.`)
-                break
+                continue
+                batchIndex++
             }
 
             const parentIds = Object.keys(batch)
