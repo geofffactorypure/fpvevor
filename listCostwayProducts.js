@@ -1504,7 +1504,7 @@ async function main() {
         let totalListed = 0
         let totalFailed = 0
         let batchesWithNoProgress = 0
-        const MAX_BATCHES_NO_PROGRESS = 5
+        const MAX_BATCHES_NO_PROGRESS = 50
 
         console.log(`\nListing up to ${LIMIT} product(s) with concurrency ${CONCURRENCY}...\n`)
 
