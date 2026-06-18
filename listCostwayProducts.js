@@ -1673,9 +1673,17 @@ function parseProductOptions(relations) {
 }
 
 function parseVariantOptions(relations) {
+    const seenValues = new Map()
+
     return relations.map((relation) => {
         const key = Object.keys(relation.option)[0]
-        const value = relation.option[key].option_value
+        const baseValue = relation.option[key].option_value
+        const mapKey = `${key}:${baseValue}`
+
+        const count = seenValues.get(mapKey) || 0
+        seenValues.set(mapKey, count + 1)
+
+        const value = count === 0 ? baseValue : `${baseValue} (${count + 1})`
 
         return {
             name: key,
