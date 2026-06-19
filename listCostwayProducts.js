@@ -1735,3 +1735,31 @@ async function getCategoryListing(categoryId) {
     await putS3Json(cacheKey, payload.result)
     return payload.result
 }
+
+async function fetchJson(url, retries = MAX_RETRIES) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const res = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+                    Accept: 'application/json',
+                },
+            })
+            if (res.status === 429) {
+                const waitMs = Math.min(60000, Math.pow(2, attempt) * 1000)
+                console.error(`  ⏳ 429 on ${url}, waiting ${waitMs}ms (attempt ${attempt}/${retries})`)
+                await sleep(waitMs)
+                continue
+            }
+            if (!res.ok) return null
+            return await res.json()
+        } catch (err) {
+            if (attempt < retries) {
+                await sleep(attempt * 1000)
+                continue
+            }
+            return null
+        }
+    }
+    return null
+}
