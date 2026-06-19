@@ -1244,7 +1244,7 @@ async function listOneParent({
         aiResult,
         product_type: productType,
         vendor: 'Costway',
-        sku: parentSku,
+        sku: parentData.sku || parentSku,
         storeInfo,
         pool,
         productOptions,
@@ -1294,7 +1294,7 @@ async function listOneParent({
         // Simple product — update the single auto-created variant
         const variantGid = createdProduct.variants?.nodes?.[0]?.id
         if (variantGid) {
-            const itemNo = firstOpt.sku || parentSku
+            const itemNo = firstOpt.sku || parentData.sku || parentSku
             await updateVariant(
                 {
                     productGid: createdProduct.id,
