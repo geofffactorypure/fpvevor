@@ -1704,14 +1704,17 @@ function parseVariantOptions(relations) {
 }
 
 async function getFeaturedImage(productData) {
+    const variant = productData.relation?.[0]
+    const fallbackGallery = variant?.gallery || productData.gallery || []
+
     const collectionId = productData.position[productData.position.length - 1]?.entity_id
-    if (!collectionId) return productData.gallery?.[0]
+    if (!collectionId) return fallbackGallery[0]
 
     const collectionData = await getCategoryListing(collectionId)
-    if (!collectionData) return productData.gallery?.[0]
+    if (!collectionData) return fallbackGallery[0]
 
     const foundProduct = collectionData.data.find((p) => p.product_id === productData.entity_id)
-    if (!foundProduct) return productData.gallery?.[0]
+    if (!foundProduct) return fallbackGallery[0]
 
     return {
         original_image: foundProduct.images.baseImage.replace(/\/cache\/[^/]+\/thumbnail\/[^/]+\/[a-f0-9]+\//, '/'),

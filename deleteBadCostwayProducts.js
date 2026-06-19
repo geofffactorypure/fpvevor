@@ -147,16 +147,13 @@ async function main() {
         if (!storeRows.length) throw new Error(`Store ${STORE_ID} not found`)
         const storeInfo = storeRows[0]
 
-        // ── Set 1: No variant images, created >= 2026-06-17 ──────────────────
+        // ── Set 1: Created >= 2026-06-17 ──────────────────
         console.log('\n── Set 1: Products with no variant images (created >= 2026-06-17) ──')
         const noImageRows = await query(
             pool,
-            `SELECT DISTINCT v.product_id, p.created_at
+            `SELECT DISTINCT p.id AS product_id, p.created_at
              FROM products p
-             JOIN variants_new v ON p.id = v.product_id
-             LEFT JOIN variant_images vi ON v.id = vi.variant_id
              WHERE p.vendor = 'Costway'
-               AND vi.variant_id IS NULL
                AND p.created_at >= '2026-06-17'
              ORDER BY p.created_at ASC`
         )
