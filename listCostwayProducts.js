@@ -25,6 +25,7 @@ const SHOPIFY_API_VERSION = '2026-01'
 const S3_BUCKET = 'fpdash-bucket'
 const S3_PRODUCT_PREFIX = 'costwaydata'
 const S3_PARENTS_PREFIX = 'costwaydata/configurableParents'
+const S3_CAT_PREFIX = 'costwaydata/categoryProducts'
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_AI_LISTER_API_KEY })
 const S3 = new AWSS3({ region: 'us-east-1' })
@@ -260,15 +261,19 @@ function parseDescription(descriptionHtml) {
     return lines.join('. ').replace(/\.\./g, '.').slice(0, 500)
 }
 
-function getGalleryImages(s3Data) {
+async function getGalleryImages(s3Data) {
     // Prefer the first variant's gallery if it has images, otherwise check parent
     const variant = s3Data.relation?.[0]
     const gallery = variant?.gallery || s3Data.gallery || []
 
     if (gallery.length === 0) return []
 
-    return gallery
-        .filter((img) => img.original_image)
+    const trueFirstImageUrl = await getFeaturedImage(s3Data)
+
+    return [
+        trueFirstImageUrl,
+        ...gallery.filter((img) => img.original_image && img.original_image !== trueFirstImageUrl.original_image),
+    ]
         .slice(0, 10)
         .map((img) => ({
             alt: img.label || img.alt || '',
@@ -370,7 +375,7 @@ function parseWarranty(warrantyContent, warrantyInfo) {
 }
 
 // ── Listing Builder (data-driven, no AI except title) ───────────────────────
-function buildListingFromData(s3Data, productType, title) {
+async function buildListingFromData(s3Data, productType, title) {
     const warranty = parseWarranty(s3Data.warranty_content, s3Data.warranty_info)
 
     // Description: prefer full description, fall back to short_description
@@ -424,7 +429,7 @@ function buildListingFromData(s3Data, productType, title) {
     const metaDescription = `${title}. Brand new. ${warranty.replace('This item comes with a ', '').replace(' warranty.', '')} warranty. Authorized dealer. Free shipping, manufacturer direct.`
 
     // Images from gallery
-    const media = getGalleryImages(s3Data)
+    const media = await getGalleryImages(s3Data)
 
     return {
         Title: title,
@@ -675,7 +680,7 @@ async function generateListingObject({ s3Data, productType, additional_prompt })
     console.log(`  AI generated title: ${title}`)
 
     // Build the full listing object from data (no AI needed for these)
-    const listing = buildListingFromData(s3Data, productType, title)
+    const listing = await buildListingFromData(s3Data, productType, title)
 
     return listing
 }
@@ -1696,4 +1701,34 @@ function parseVariantOptions(relations) {
             opt: relation,
         }
     })
+}
+
+async function getFeaturedImage(productData) {
+    const collectionId = productData.position[productData.position.length - 1]?.entity_id
+    if (!collectionId) return productData.gallery?.[0]
+
+    const collectionData = await getCategoryListing(collectionId)
+    if (!collectionData) return productData.gallery?.[0]
+
+    const foundProduct = collectionData.data.find((p) => p.product_id === productData.entity_id)
+    if (!foundProduct) return productData.gallery?.[0]
+
+    return {
+        original_image: foundProduct.images.baseImage.replace(/\/cache\/[^/]+\/thumbnail\/[^/]+\/[a-f0-9]+\//, '/'),
+        alt: foundProduct.name,
+    }
+}
+
+async function getCategoryListing(categoryId) {
+    const cacheKey = `${S3_CAT_PREFIX}/${categoryId}`
+    const cached = await getS3Json(cacheKey)
+    if (cached !== null) return cached
+
+    const url = `https://www.costway.com/api/products?category_id=${categoryId}&pagesize=10000`
+    const payload = await fetchJson(url)
+    await sleep(DELAY_MS)
+
+    if (!payload?.result) return null
+    await putS3Json(cacheKey, payload.result)
+    return payload.result
 }
