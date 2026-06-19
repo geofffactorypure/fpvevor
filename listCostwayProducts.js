@@ -1152,8 +1152,12 @@ async function listOneParent({
     }
 
     // 3. Skip if already listed
-    if (listedSkuSet.has(parentSku) /* || listedItemNoSet.has(parentSku) || listedItemNoSet.has(String(parentId)) */) {
-        console.log(`[${parentSku}] Already listed, skipping`)
+    if (
+        listedSkuSet.has(
+            parentData.sku
+        ) /* || listedItemNoSet.has(parentSku) || listedItemNoSet.has(String(parentId)) */
+    ) {
+        console.log(`[${parentData.sku}] Already listed, skipping`)
         return null
     }
     if (options.some((o) => o.sku && listedSkuSet.has(o.sku))) {
