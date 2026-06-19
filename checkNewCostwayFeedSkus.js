@@ -103,6 +103,7 @@ async function main() {
         columns: true,
         skip_empty_lines: true,
         relax_column_count: true,
+        relax_quotes: true,
         bom: true,
     })
     console.log(`Feed rows: ${rows.length}`)
