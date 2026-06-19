@@ -1117,7 +1117,7 @@ async function listOneParent({
     parentEntry,
     skuToProductType,
     listedSkuSet,
-    listedItemNoSet,
+    // listedItemNoSet,
     storeInfo,
     publications,
     additionalPrompt,
@@ -1152,7 +1152,7 @@ async function listOneParent({
     }
 
     // 3. Skip if already listed
-    if (listedSkuSet.has(parentSku) || listedItemNoSet.has(parentSku) || listedItemNoSet.has(String(parentId))) {
+    if (listedSkuSet.has(parentSku) /* || listedItemNoSet.has(parentSku) || listedItemNoSet.has(String(parentId)) */) {
         console.log(`[${parentSku}] Already listed, skipping`)
         return null
     }
@@ -1495,13 +1495,13 @@ async function main() {
             `SELECT vn.sku FROM variants_new vn JOIN products p ON p.id = vn.product_id WHERE p.vendor = 'Costway' AND vn.sku IS NOT NULL`
         )
         const listedSkuSet = new Set(listedSkuRows.map((r) => r.sku))
-        const listedEventRows = await query(
-            pool,
-            `SELECT JSON_UNQUOTE(JSON_EXTRACT(event_data, '$.item_no')) as item_no FROM product_listing_events WHERE store_id = ? AND event_type = 'PRODUCT_LISTED' AND JSON_EXTRACT(event_data, '$.item_no') IS NOT NULL`,
-            [STORE_ID]
-        ).catch(() => [])
-        const listedItemNoSet = new Set(listedEventRows.map((r) => r.item_no).filter(Boolean))
-        console.log(`${listedSkuSet.size} SKUs and ${listedItemNoSet.size} item_nos already listed`)
+        // const listedEventRows = await query(
+        //     pool,
+        //     `SELECT JSON_UNQUOTE(JSON_EXTRACT(event_data, '$.item_no')) as item_no FROM product_listing_events WHERE store_id = ? AND event_type = 'PRODUCT_LISTED' AND JSON_EXTRACT(event_data, '$.item_no') IS NOT NULL`,
+        //     [STORE_ID]
+        // ).catch(() => [])
+        // const listedItemNoSet = new Set(listedEventRows.map((r) => r.item_no).filter(Boolean))
+        console.log(`${listedSkuSet.size} SKUs already listed`)
 
         // 3. Get store info
         const storeInfo = await getStoreInfo(pool)
@@ -1576,7 +1576,7 @@ async function main() {
 
             // Filter to parents not yet listed
             const candidates = parentIds.filter((id) => {
-                if (listedItemNoSet.has(String(id))) return false
+                // if (listedItemNoSet.has(String(id))) return false
                 const opts = batch[id].options || []
                 if (opts.some((o) => o.sku && listedSkuSet.has(o.sku))) return false
                 return true
@@ -1610,7 +1610,7 @@ async function main() {
                             parentEntry: batch[parentId],
                             skuToProductType,
                             listedSkuSet,
-                            listedItemNoSet,
+                            // listedItemNoSet,
                             storeInfo,
                             publications,
                             additionalPrompt,
