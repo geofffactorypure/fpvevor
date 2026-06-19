@@ -1163,10 +1163,6 @@ async function listOneParent({
 
     const isConfigurable = options.length > 1
 
-    if (!isConfigurable) {
-        return
-    }
-
     // 4. Parse option groups for configurable products
     let productOptions = null
     let parsedOptions = [] // [{name, value, opt}]
@@ -1578,7 +1574,10 @@ async function main() {
             const candidates = parentIds.filter((id) => {
                 // if (listedItemNoSet.has(String(id))) return false
                 const opts = batch[id].options || []
-                if (opts.some((o) => o.sku && listedSkuSet.has(o.sku))) return false
+                if (opts.some((o) => o.sku && listedSkuSet.has(o.sku))) {
+                    console.log(`  Parent ${id} has options already listed, skipping...`)
+                    return false
+                }
                 return true
             })
 
