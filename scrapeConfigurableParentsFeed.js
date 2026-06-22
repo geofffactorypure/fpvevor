@@ -371,5 +371,5 @@ async function searchApiForProduct(itemNo) {
         isLogin: false,
     }
     const result = await postJson(url, body)
-    return result.data.datalist[0]
+    return result?.data?.datalist?.[0]
 }
