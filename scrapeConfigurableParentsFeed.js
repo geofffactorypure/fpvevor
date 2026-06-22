@@ -244,51 +244,39 @@ async function main() {
         let product = payload.result
 
         const sku = product.sku
-        // const position = Array.isArray(product.position) ? product.position : []
-        // console.log(sku, position.map((p) => p.entity_id).join('/'))
-        // if (!sku /* || !position.length */) {
-        //     console.log(`  ✗ fep=${fepId}: missing SKU or position, skipping`)
-        //     console.log(product)
-        //     continue
-        // }
 
-        // ── Step 2: get search product listing ─────────────────
-        // let catIndex = 2
-        // let self = null
-        // while (catIndex >= 0) {
-        //     const leafCategoryId = position[catIndex]?.entity_id
-        //     if (!leafCategoryId) {
-        //         console.log(`  ✗ fep=${fepId}: missing leaf category ID, skipping`)
-        //         catIndex--
-        //     }
-        //     const listing = await getCategoryListing(leafCategoryId, sku)
-        //     if (!listing) {
-        //         console.log(`  ✗ fep=${fepId}: no category listing, skipping`)
-        //         catIndex--
-        //         continue
-        //     }
-
-        //     const listingItems = listing.data ?? listing.items ?? []
-        //     if (!Array.isArray(listingItems)) {
-        //         console.log(`  ✗ fep=${fepId}: invalid category listing format, skipping`)
-        //         catIndex--
-        //         continue
-        //     }
-
-        //     // ── Step 3: find current product in listing → get parent_id ───────
-        //     self = findProductInListing(listingItems, fepId)
-        //     if (!self) {
-        //         console.log(`  ✗ fep=${fepId}: product not found in category listing, skipping`)
-        //         catIndex--
-        //         continue
-        //     }
-        //     break
-        // }
-
-        const self = await searchApiForProduct(product.item_no)
+        let self = await searchApiForProduct(product.item_no)
         if (!self) {
-            console.log(`  ✗ fep=${fepId}: product not found in search API, skipping`)
-            continue
+            console.log(`  ✗ fep=${fepId}: product not found in search API, trying category listing...`)
+            const position = Array.isArray(product.position) ? product.position : []
+            console.log(sku, position.map((p) => p.entity_id).join('/'))
+            if (!sku /* || !position.length */) {
+                console.log(`  ✗ fep=${fepId}: missing SKU or position, skipping`)
+                console.log(product)
+            }
+
+            // ── Step 2: get search product listing ─────────────────
+            let self = null
+            const leafCategoryId = position[catIndex]?.entity_id
+            if (!leafCategoryId) {
+                console.log(`  ✗ fep=${fepId}: missing leaf category ID, skipping`)
+            }
+            const listing = await getCategoryListing(leafCategoryId, sku)
+            if (!listing) {
+                console.log(`  ✗ fep=${fepId}: no category listing, skipping`)
+            }
+
+            const listingItems = listing.data ?? listing.items ?? []
+            if (!Array.isArray(listingItems)) {
+                console.log(`  ✗ fep=${fepId}: invalid category listing format, skipping`)
+            }
+
+            // ── Step 3: find current product in listing → get parent_id ───────
+            self = findProductInListing(listingItems, fepId)
+            if (!self) {
+                console.log(`  ✗ fep=${fepId}: product not found in category listing, skipping`)
+                continue
+            }
         }
 
         const rawParentId = self.parentId
