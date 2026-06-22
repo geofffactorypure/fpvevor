@@ -251,7 +251,7 @@ async function main() {
     console.log(`Feed rows: ${rows.length} → unique Item Nos: ${itemNoSet.size}`)
 
     // ── Load progress ────────────────────────────────────────────────────────
-    let progress = { lastProcessedIndex: -1, configurableCount: 0, batchIndex: 0 }
+    let progress = { lastProcessedIndex: 2299, configurableCount: 0, batchIndex: 0 }
     let configurableCount = progress.configurableCount || 0
     let batchIndex = progress.batchIndex || 0
     const resumeFrom = (progress.lastProcessedIndex ?? -1) + 1
