@@ -1,7 +1,7 @@
 import { config } from 'dotenv'
 config({ path: './.env' })
 config({ path: './.env.local', override: true })
-
+import mysql from 'mysql'
 import fs, { createWriteStream } from 'fs'
 import fetch from 'node-fetch'
 import { parse } from 'csv-parse/sync'
@@ -24,6 +24,28 @@ const FEED_URL = 'https://www.costway.com/media/feed/US-Dropship-Shopify.csv'
 const MIN_FEED_BYTES = 50 * 1024 * 1024
 
 const S3 = new AWSS3({ region: process.env.AWS_REGION || 'us-east-1' })
+const { DB_PASSWORD, DB_WRITE_HOST, DB_USER } = process.env
+
+function createPool() {
+    return mysql.createPool({
+        connectionLimit: 5,
+        host: DB_WRITE_HOST,
+        user: DB_USER,
+        password: DB_PASSWORD,
+        port: 3306,
+        database: 'main',
+        timezone: '+00:00',
+    })
+}
+
+function query(pool, sql, args = []) {
+    return new Promise((resolve, reject) => {
+        pool.query(sql, args, (err, results) => {
+            if (err) return reject(err)
+            resolve(results)
+        })
+    })
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -177,11 +199,17 @@ async function getCategoryListing(categoryId, sku) {
 // ── Main ────────────────────────────────────────────────────────────────────
 async function main() {
     // await downloadFeedToCache()
+    const pool = createPool()
     // ── Load feed ────────────────────────────────────────────────────────────
     if (!fs.existsSync(FEED_CACHE_PATH)) {
         console.error('Feed cache not found at', FEED_CACHE_PATH)
         process.exit(1)
     }
+    const listedSkuRows = await query(
+        pool,
+        `SELECT vn.sku FROM variants_new vn JOIN products p ON p.id = vn.product_id WHERE p.vendor = 'Costway' AND vn.sku IS NOT NULL`
+    )
+    const listedSkuSet = new Set(listedSkuRows.map((r) => r.sku))
     const feedCsv = fs.readFileSync(FEED_CACHE_PATH, 'utf8')
     const rows = parse(feedCsv, {
         columns: true,
@@ -214,7 +242,10 @@ async function main() {
     // }
     for (const row of rows) {
         const itemNo = (row['Item No'] || '').trim()
-        if (itemNo) itemNoSet.add(itemNo)
+        const sku = (row['Variant SKU'] || '').trim()
+        if (itemNo && !listedSkuSet.has(sku)) {
+            itemNoSet.add(itemNo)
+        }
     }
     // const fepIds = [...fepSet].sort((a, b) => a - b)
     console.log(`Feed rows: ${rows.length} → unique Item Nos: ${itemNoSet.size}`)
