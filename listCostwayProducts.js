@@ -1130,7 +1130,7 @@ async function listOneParent({
     pool,
 }) {
     // 1. Fetch parent product data from S3
-    const parentData = await fetchProductFromS3(parentId)
+    const parentData = await fetchProductWithFallback(parentId)
     if (!parentData) {
         console.log(`[parent:${parentId}] No S3 data found, skipping`)
         return null
