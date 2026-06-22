@@ -123,7 +123,6 @@ async function postJson(url, body, retries = MAX_RETRIES) {
                 console.error(
                     `  ⏳ Invalid response format from POST ${url}, waiting ${waitMs}ms (attempt ${attempt}/${retries})`
                 )
-                console.log(result, body)
                 await sleep(waitMs)
                 continue
             }
@@ -177,7 +176,7 @@ async function getCategoryListing(categoryId, sku) {
 
 // ── Main ────────────────────────────────────────────────────────────────────
 async function main() {
-    await downloadFeedToCache()
+    // await downloadFeedToCache()
     // ── Load feed ────────────────────────────────────────────────────────────
     if (!fs.existsSync(FEED_CACHE_PATH)) {
         console.error('Feed cache not found at', FEED_CACHE_PATH)
@@ -191,29 +190,34 @@ async function main() {
         quote: false,
     })
 
-    const fepSet = new Set()
+    // const fepSet = new Set()
+    const itemNoSet = new Set()
+    // for (const row of rows) {
+    //     const rawLink = row['Item Link']
+    //     if (!rawLink) continue
+
+    //     try {
+    //         const link = String(rawLink)
+    //             .trim()
+    //             .replace(/^["']|["']$/g, '') // strip surrounding quotes
+    //             .replace(/[\u200B-\u200D\uFEFF]/g, '') // remove zero-width chars/BOM
+
+    //         const url = new URL(link.startsWith('http') ? link : `https://${link}`)
+
+    //         const fep = parseInt(url.searchParams.get('fep'), 10)
+    //         if (!Number.isNaN(fep)) {
+    //             fepSet.add(fep)
+    //         }
+    //     } catch (err) {
+    //         console.warn(`Invalid URL in feed: ${JSON.stringify(rawLink)} (${err.message})`)
+    //     }
+    // }
     for (const row of rows) {
-        const rawLink = row['Item Link']
-        if (!rawLink) continue
-
-        try {
-            const link = String(rawLink)
-                .trim()
-                .replace(/^["']|["']$/g, '') // strip surrounding quotes
-                .replace(/[\u200B-\u200D\uFEFF]/g, '') // remove zero-width chars/BOM
-
-            const url = new URL(link.startsWith('http') ? link : `https://${link}`)
-
-            const fep = parseInt(url.searchParams.get('fep'), 10)
-            if (!Number.isNaN(fep)) {
-                fepSet.add(fep)
-            }
-        } catch (err) {
-            console.warn(`Invalid URL in feed: ${JSON.stringify(rawLink)} (${err.message})`)
-        }
+        const itemNo = (row['Item No'] || '').trim()
+        if (itemNo) itemNoSet.add(itemNo)
     }
-    const fepIds = [...fepSet].sort((a, b) => a - b)
-    console.log(`Feed rows: ${rows.length} → unique FEP IDs: ${fepIds.length}`)
+    // const fepIds = [...fepSet].sort((a, b) => a - b)
+    console.log(`Feed rows: ${rows.length} → unique Item Nos: ${itemNoSet.size}`)
 
     // ── Load progress ────────────────────────────────────────────────────────
     let progress = { lastProcessedIndex: -1, configurableCount: 0, batchIndex: 0 }
@@ -225,88 +229,33 @@ async function main() {
     let currentBatch = {}
     let batchCount = 0
 
-    console.log(`Resuming from index ${resumeFrom} / ${fepIds.length}`)
+    console.log(`Resuming from index ${resumeFrom} / ${itemNoSet.size}`)
     console.log(`Configurable parents so far: ${configurableCount}, batch index: ${batchIndex}`)
 
-    for (let i = resumeFrom; i < fepIds.length; i++) {
-        const fepId = fepIds[i]
+    for (let i = resumeFrom; i < itemNoSet.size; i++) {
+        const itemNo = [...itemNoSet][i]
 
         if (i > 0 && i % 500 === 0) {
-            console.log(`  … index ${i}/${fepIds.length} (${configurableCount} parents found so far)`)
+            console.log(`  … index ${i}/${itemNoSet.size} (${configurableCount} parents found so far)`)
         }
 
         // ── Step 1: get product data (with API fallback) ─────────────────
-        let payload = await fetchJson(`https://www.costway.com/api/product/${fepId}`)
-        if (!payload?.result) {
-            console.log(`  ✗ fep=${fepId}: no product data from API, skipping`)
+        const product = await searchApiForProduct(itemNo)
+        await sleep(DELAY_MS)
+        if (!product) {
+            console.log(`  ✗ itemNo=${itemNo}: no product data from API, skipping`)
             continue
         }
-        let product = payload.result
 
         const sku = product.sku
 
-        let self = await searchApiForProduct(product.item_no)
-        if (!self) {
-            console.log(`  ✗ fep=${fepId}: product not found in search API, trying category listing...`)
-            const position = Array.isArray(product.position) ? product.position : []
-            console.log(sku, position.map((p) => p.entity_id).join('/'))
-            if (!sku /* || !position.length */) {
-                console.log(`  ✗ fep=${fepId}: missing SKU or position, skipping`)
-                console.log(product)
-            }
-
-            // ── Step 2: get search product listing ─────────────────
-            let self = null
-            const leafCategoryId = position[catIndex]?.entity_id
-            if (!leafCategoryId) {
-                console.log(`  ✗ fep=${fepId}: missing leaf category ID, skipping`)
-            }
-            const listing = await getCategoryListing(leafCategoryId, sku)
-            if (!listing) {
-                console.log(`  ✗ fep=${fepId}: no category listing, skipping`)
-            }
-
-            const listingItems = listing.data ?? listing.items ?? []
-            if (!Array.isArray(listingItems)) {
-                console.log(`  ✗ fep=${fepId}: invalid category listing format, skipping`)
-            }
-
-            // ── Step 3: find current product in listing → get parent_id ───────
-            self = findProductInListing(listingItems, fepId)
-            if (!self) {
-                console.log(`  ✗ fep=${fepId}: product not found in category listing, skipping`)
-                continue
-            }
-        }
-
-        const rawParentId = self.parentId
-        // If parent_id is 0 or missing, the product has no configurable parent — treat it as its own parent
-        const parentId = rawParentId && rawParentId !== 0 ? rawParentId : fepId
-
-        // ── Step 4: get parent product data ───────────────────────────────
-        let parentProduct
-        if (parentId === fepId) {
-            // No configurable parent — product is its own parent, use it directly
-            parentProduct = product
-        } else {
-            parentProduct = await getS3Json(`${S3_PRODUCT_PREFIX}/${parentId}`)
-            if (!parentProduct) {
-                const payload = await fetchJson(`https://www.costway.com/api/product/${parentId}`)
-                await sleep(DELAY_MS)
-                if (!payload?.result) {
-                    console.log(`  ✗ fep=${fepId}: no parent product data from API, skipping`)
-                    continue
-                }
-                parentProduct = payload.result
-                await putS3Json(`${S3_PRODUCT_PREFIX}/${parentId}`, parentProduct)
-            }
-            if (parentProduct.type_id !== 'configurable') {
-                console.log(`  ✗ fep=${fepId}: parent product is not configurable, skipping`)
-                continue
-            }
-        }
+        const parentProductPayload = await fetchJson(
+            `https://www.costway.com/api/product/${product.parentId || product.productId}`
+        )
+        const parentProduct = parentProductPayload?.result
 
         // ── Step 5: accumulate parent in batch ────────────────────────────
+        const parentId = product?.parent_id || product?.productId
         if (!seenParents.has(parentId)) {
             seenParents.add(parentId)
             const entry = buildParentEntry(parentProduct)
@@ -315,7 +264,7 @@ async function main() {
             configurableCount++
 
             console.log(
-                `  ✓ fep=${fepId} → parent=${parentId} (${entry.associatedProducts.length} assoc, ${(entry.options || []).length} opts)`
+                `  ✓ itemNo=${itemNo} → parent=${parentId} (${entry.associatedProducts.length} assoc, ${(entry.options || []).length} opts)`
             )
 
             if (batchCount >= 100) {
@@ -339,13 +288,13 @@ async function main() {
         console.log(`  💾 final batch flushed → key ${S3_PARENTS_PREFIX}/${(batchIndex - 1) * 100}`)
     }
 
-    progress.lastProcessedIndex = fepIds.length - 1
+    progress.lastProcessedIndex = itemNoSet.size - 1
     progress.configurableCount = configurableCount
     progress.batchIndex = batchIndex
     await putS3Json(S3_PROGRESS_KEY, progress)
 
     console.log('\nDone.')
-    console.log(`FEP IDs processed : ${fepIds.length - resumeFrom}`)
+    console.log(`Item Nos processed : ${itemNoSet.size - resumeFrom}`)
     console.log(`Configurable parents found : ${configurableCount}`)
 }
 
