@@ -2,27 +2,49 @@ import { config } from 'dotenv'
 config({ path: './.env' })
 config({ path: './.env.local', override: true })
 
-import fs from 'fs'
+import fs, { createWriteStream } from 'fs'
 import fetch from 'node-fetch'
 import { parse } from 'csv-parse/sync'
 import { URL } from 'url'
 import { S3 as AWSS3, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
+import { pipeline } from 'stream/promises'
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const DELAY_MS = parseInt(process.argv[2]) || 400 // only applied to live API calls
 const MAX_RETRIES = 5
 const FEED_CACHE_PATH = './costway_data/feed_cache.csv'
-
+const OUTPUT_DIR = './costway_data'
 const S3_BUCKET = 'fpdash-bucket'
 const S3_PRODUCT_PREFIX = 'costwaydata'
 const S3_CAT_PREFIX = 'costwaydata/categoryProducts'
 const S3_PARENTS_PREFIX = 'costwaydata/configurableParents'
 const S3_PROGRESS_KEY = 'costwaydata/configurableParentsFeedProgress'
+const FEED_CACHE_FILE = `${OUTPUT_DIR}/feed_cache.csv`
+const FEED_URL = 'https://www.costway.com/media/feed/US-Dropship-Shopify.csv'
+const MIN_FEED_BYTES = 50 * 1024 * 1024
 
 const S3 = new AWSS3({ region: process.env.AWS_REGION || 'us-east-1' })
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+async function downloadFeedToCache() {
+    console.log(`Downloading feed from ${FEED_URL} ...`)
+    const feedRes = await fetch(FEED_URL, { headers: { 'User-Agent': 'Mozilla/5.0' } })
+    if (!feedRes.ok) throw new Error(`Feed download failed: ${feedRes.status}`)
+
+    const tempFile = `${FEED_CACHE_FILE}.tmp`
+    await pipeline(feedRes.body, createWriteStream(tempFile))
+
+    const bytes = fs.statSync(tempFile).size
+    if (bytes < MIN_FEED_BYTES) {
+        fs.unlinkSync(tempFile)
+        throw new Error(`Downloaded feed too small (${bytes} bytes), refusing to cache partial file`)
+    }
+
+    fs.renameSync(tempFile, FEED_CACHE_FILE)
+    console.log(`Feed cached to ${FEED_CACHE_FILE} (${Math.round(bytes / 1024 / 1024)} MB)`)
+}
 
 async function getS3Json(key) {
     try {
@@ -74,6 +96,49 @@ async function fetchJson(url, retries = MAX_RETRIES) {
     return null
 }
 
+async function postJson(url, body, retries = MAX_RETRIES) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const res = await fetch(url, {
+                method: 'POST',
+                body: JSON.stringify(body),
+            })
+            if (res.status === 429) {
+                const waitMs = Math.min(60000, Math.pow(2, attempt) * 1000)
+                console.error(`  ⏳ 429 on POST ${url}, waiting ${waitMs}ms (attempt ${attempt}/${retries})`)
+                await sleep(waitMs)
+                continue
+            }
+            if (!res.ok) {
+                const waitMs = Math.min(60000, Math.pow(2, attempt) * 1000)
+                console.error(
+                    `  ⏳ HTTP ${res.status} on POST ${url}, waiting ${waitMs}ms (attempt ${attempt}/${retries})`
+                )
+                await sleep(waitMs)
+                continue
+            }
+            const result = await res.json()
+            if (!result?.data?.datalist[0]) {
+                const waitMs = Math.min(60000, Math.pow(2, attempt) * 1000)
+                console.error(
+                    `  ⏳ Invalid response format from POST ${url}, waiting ${waitMs}ms (attempt ${attempt}/${retries})`
+                )
+                console.log(result, body)
+                await sleep(waitMs)
+                continue
+            }
+            return result
+        } catch (err) {
+            if (attempt < retries) {
+                await sleep(attempt * 1000)
+                continue
+            }
+            return null
+        }
+    }
+    return null
+}
+
 function buildParentEntry(result) {
     return {
         associatedProducts: (result.pdp_associated_products || []).map((p) => p.product_id),
@@ -96,11 +161,12 @@ function buildParentEntry(result) {
 
 // ── Category product listing (S3-cached) ────────────────────────────────────
 async function getCategoryListing(categoryId, sku) {
+    console.log(`  Fetching category listing for category_id=${categoryId} (looking for SKU=${sku})`)
     const cacheKey = `${S3_CAT_PREFIX}/${categoryId}`
     const cached = await getS3Json(cacheKey)
     if (cached !== null) return cached
 
-    const url = `https://www.costway.com/api/products?sku=${encodeURIComponent(sku)}&category_id=${categoryId}&pagesize=10000`
+    const url = `https://www.costway.com/api/products?category_id=${categoryId}&pagesize=10000`
     const payload = await fetchJson(url)
     await sleep(DELAY_MS)
 
@@ -111,6 +177,7 @@ async function getCategoryListing(categoryId, sku) {
 
 // ── Main ────────────────────────────────────────────────────────────────────
 async function main() {
+    await downloadFeedToCache()
     // ── Load feed ────────────────────────────────────────────────────────────
     if (!fs.existsSync(FEED_CACHE_PATH)) {
         console.error('Feed cache not found at', FEED_CACHE_PATH)
@@ -126,18 +193,30 @@ async function main() {
 
     const fepSet = new Set()
     for (const row of rows) {
-        const link = row['Item Link']
-        if (!link) continue
+        const rawLink = row['Item Link']
+        if (!rawLink) continue
+
         try {
-            const fep = new URL(link).searchParams.get('fep')
-            if (fep && !isNaN(parseInt(fep))) fepSet.add(parseInt(fep))
-        } catch {}
+            const link = String(rawLink)
+                .trim()
+                .replace(/^["']|["']$/g, '') // strip surrounding quotes
+                .replace(/[\u200B-\u200D\uFEFF]/g, '') // remove zero-width chars/BOM
+
+            const url = new URL(link.startsWith('http') ? link : `https://${link}`)
+
+            const fep = parseInt(url.searchParams.get('fep'), 10)
+            if (!Number.isNaN(fep)) {
+                fepSet.add(fep)
+            }
+        } catch (err) {
+            console.warn(`Invalid URL in feed: ${JSON.stringify(rawLink)} (${err.message})`)
+        }
     }
     const fepIds = [...fepSet].sort((a, b) => a - b)
     console.log(`Feed rows: ${rows.length} → unique FEP IDs: ${fepIds.length}`)
 
     // ── Load progress ────────────────────────────────────────────────────────
-    let progress = (await getS3Json(S3_PROGRESS_KEY)) ?? { lastProcessedIndex: -1, configurableCount: 0, batchIndex: 0 }
+    let progress = { lastProcessedIndex: -1, configurableCount: 0, batchIndex: 0 }
     let configurableCount = progress.configurableCount || 0
     let batchIndex = progress.batchIndex || 0
     const resumeFrom = (progress.lastProcessedIndex ?? -1) + 1
@@ -157,34 +236,62 @@ async function main() {
         }
 
         // ── Step 1: get product data (with API fallback) ─────────────────
-        let product = await getS3Json(`${S3_PRODUCT_PREFIX}/${fepId}`)
-        if (!product) {
-            const payload = await fetchJson(`https://www.costway.com/api/product/${fepId}`)
-            await sleep(DELAY_MS)
-            if (!payload?.result) continue
-            product = payload.result
-            await putS3Json(`${S3_PRODUCT_PREFIX}/${fepId}`, product)
+        let payload = await fetchJson(`https://www.costway.com/api/product/${fepId}`)
+        if (!payload?.result) {
+            console.log(`  ✗ fep=${fepId}: no product data from API, skipping`)
+            continue
         }
+        let product = payload.result
 
         const sku = product.sku
-        const position = Array.isArray(product.position) ? product.position : []
-        if (!sku || !position.length) continue
+        // const position = Array.isArray(product.position) ? product.position : []
+        // console.log(sku, position.map((p) => p.entity_id).join('/'))
+        // if (!sku /* || !position.length */) {
+        //     console.log(`  ✗ fep=${fepId}: missing SKU or position, skipping`)
+        //     console.log(product)
+        //     continue
+        // }
 
-        const leafCategoryId = position[position.length - 1]?.entity_id
-        if (!leafCategoryId) continue
+        // ── Step 2: get search product listing ─────────────────
+        // let catIndex = 2
+        // let self = null
+        // while (catIndex >= 0) {
+        //     const leafCategoryId = position[catIndex]?.entity_id
+        //     if (!leafCategoryId) {
+        //         console.log(`  ✗ fep=${fepId}: missing leaf category ID, skipping`)
+        //         catIndex--
+        //     }
+        //     const listing = await getCategoryListing(leafCategoryId, sku)
+        //     if (!listing) {
+        //         console.log(`  ✗ fep=${fepId}: no category listing, skipping`)
+        //         catIndex--
+        //         continue
+        //     }
 
-        // ── Step 2: get category product listing (cached) ─────────────────
-        const listing = await getCategoryListing(leafCategoryId, sku)
-        if (!listing) continue
+        //     const listingItems = listing.data ?? listing.items ?? []
+        //     if (!Array.isArray(listingItems)) {
+        //         console.log(`  ✗ fep=${fepId}: invalid category listing format, skipping`)
+        //         catIndex--
+        //         continue
+        //     }
 
-        const listingItems = listing.data ?? listing.items ?? []
-        if (!Array.isArray(listingItems)) continue
+        //     // ── Step 3: find current product in listing → get parent_id ───────
+        //     self = findProductInListing(listingItems, fepId)
+        //     if (!self) {
+        //         console.log(`  ✗ fep=${fepId}: product not found in category listing, skipping`)
+        //         catIndex--
+        //         continue
+        //     }
+        //     break
+        // }
 
-        // ── Step 3: find current product in listing → get parent_id ───────
-        const self = listingItems.find((x) => x.entity_id === fepId || x.product_id === fepId)
-        if (!self) continue
+        const self = await searchApiForProduct(product.item_no)
+        if (!self) {
+            console.log(`  ✗ fep=${fepId}: product not found in search API, skipping`)
+            continue
+        }
 
-        const rawParentId = self.parent_id
+        const rawParentId = self.parentId
         // If parent_id is 0 or missing, the product has no configurable parent — treat it as its own parent
         const parentId = rawParentId && rawParentId !== 0 ? rawParentId : fepId
 
@@ -198,11 +305,17 @@ async function main() {
             if (!parentProduct) {
                 const payload = await fetchJson(`https://www.costway.com/api/product/${parentId}`)
                 await sleep(DELAY_MS)
-                if (!payload?.result) continue
+                if (!payload?.result) {
+                    console.log(`  ✗ fep=${fepId}: no parent product data from API, skipping`)
+                    continue
+                }
                 parentProduct = payload.result
                 await putS3Json(`${S3_PRODUCT_PREFIX}/${parentId}`, parentProduct)
             }
-            if (parentProduct.type_id !== 'configurable') continue
+            if (parentProduct.type_id !== 'configurable') {
+                console.log(`  ✗ fep=${fepId}: parent product is not configurable, skipping`)
+                continue
+            }
         }
 
         // ── Step 5: accumulate parent in batch ────────────────────────────
@@ -252,3 +365,43 @@ main().catch((err) => {
     console.error('Fatal:', err)
     process.exit(1)
 })
+
+function findProductInListing(listingItems, fepId) {
+    const fepNum = Number(fepId)
+
+    for (const item of listingItems) {
+        if (Number(item.entity_id) === fepNum || Number(item.product_id) === fepNum) {
+            return item
+        }
+
+        if (Array.isArray(item.relation)) {
+            const relationMatch = item.relation.find(
+                (r) => Number(r.product_id) === fepNum || Number(r.entity_id) === fepNum
+            )
+
+            if (relationMatch) {
+                return {
+                    ...relationMatch,
+                    parent_id: relationMatch.parent_id ?? item.parent_id,
+                    product_id: relationMatch.product_id ?? fepNum,
+                    entity_id: relationMatch.entity_id ?? relationMatch.product_id ?? fepNum,
+                }
+            }
+        }
+    }
+
+    return null
+}
+
+async function searchApiForProduct(itemNo) {
+    const url = 'https://www.costway.com/searchApi/mobile/search'
+    const body = {
+        keyword: itemNo,
+        page: 1,
+        pageSize: 48,
+        userId: 0,
+        isLogin: false,
+    }
+    const result = await postJson(url, body)
+    return result.data.datalist[0]
+}
