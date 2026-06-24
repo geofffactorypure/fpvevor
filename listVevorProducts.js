@@ -11,7 +11,7 @@ import mysql from 'mysql'
 import { parse } from 'csv-parse/sync'
 import { S3 as AWSS3 } from '@aws-sdk/client-s3'
 import { Upload } from '@aws-sdk/lib-storage'
-import { chromium } from 'playwright'
+import { JSDOM, VirtualConsole } from 'jsdom'
 import jwt from 'jsonwebtoken'
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -294,35 +294,31 @@ async function removeFirstImageBackground(imageUrls, store_id) {
 }
 
 // ── Image Scraping ──────────────────────────────────────────────────────────
-// Vevor uses AWS WAF JS challenge — plain fetch() returns 202 with empty body.
-// Playwright solves the challenge and also handles lazy-loaded data-src images.
-let _browser = null
-async function getBrowser() {
-    if (!_browser) {
-        _browser = await chromium.launch({ headless: true })
-    }
-    return _browser
-}
-
 async function scrapeProductImages(productUrl) {
-    const browser = await getBrowser()
-    const page = await browser.newPage()
+    const res = await fetch(productUrl, {
+        headers: {
+            'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+        },
+        signal: AbortSignal.timeout(15000),
+    })
+    if (!res.ok) throw new Error(`Failed to fetch product page (${res.status}): ${productUrl}`)
+    const html = await res.text()
+    const virtualConsole = new VirtualConsole()
+    const dom = new JSDOM(html, { virtualConsole })
     try {
-        await page.goto(productUrl, { waitUntil: 'load', timeout: 45000 })
-        // Wait for the gallery container to appear after WAF challenge resolves
-        await page.waitForSelector('.DM_LTL-preview-img', { timeout: 15000 }).catch(() => {})
-        const media = await page.evaluate(() => {
-            return Array.from(document.querySelectorAll('.DM_LTL-preview-img'))
-                .map((el) => {
-                    // Prefer img-big (1600x1600, original_img-v1) over img-normal (1000x1000)
-                    const img = el.querySelector('img.img-big') || el.querySelector('img')
-                    const src = img?.getAttribute('data-src') || img?.getAttribute('src') || ''
-                    if (!src || src.startsWith('data:')) return null
-                    const alt = img?.getAttribute('alt') || ''
-                    return { alt, mediaContentType: 'IMAGE', originalSource: src }
-                })
-                .filter(Boolean)
-        })
+        const document = dom.window.document
+        const media = Array.from(document.querySelectorAll('.DM_LTL-preview-img'))
+            .map((el) => {
+                const img = el.querySelector('img')
+                const src = img?.getAttribute('data-src') || img?.getAttribute('src') || ''
+                if (!src || src.startsWith('data:')) return null
+                const alt = img?.getAttribute('alt') || ''
+                return { alt, mediaContentType: 'IMAGE', originalSource: src }
+            })
+            .filter(Boolean)
         if (media.length === 0) {
             console.warn(`No images found with .DM_LTL-preview-img selector on ${productUrl}`)
         } else {
@@ -330,7 +326,7 @@ async function scrapeProductImages(productUrl) {
         }
         return media
     } finally {
-        await page.close()
+        dom.window.close()
     }
 }
 
@@ -1108,7 +1104,6 @@ async function main() {
         console.log(`\n✓ Done! ${successCount} succeeded, ${failCount} failed.`)
     } finally {
         pool.end()
-        if (_browser) await _browser.close()
     }
 }
 
