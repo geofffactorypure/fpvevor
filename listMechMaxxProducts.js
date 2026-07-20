@@ -140,35 +140,43 @@ function extractWarrantyFromHtml(bodyHtml) {
 }
 
 // ── Title Prompt ─────────────────────────────────────────────────────────────
-const titlePrompt = `Generate an SEO-optimized product title for an authorized dealer listing.
+const titlePrompt = `Generate a product title for an authorized dealer listing.
 
 Title Rules:
-- Format: MechMaxx [model] [SEO optimized product description]
-- Include the model number right after "MechMaxx"
-- Keep it concise but descriptive (under 80 characters if possible)
+- Format: [brand] [model] [product type] [product title] New
+- The model number MUST appear immediately after the brand name
+- The product type (human-readable, e.g. "Wood Chipper" not "Chippers/Shredders") MUST appear right after the model number
+- The remaining product title words can be SEO optimized and reordered
 - Truncate units: 'inches' to 'in', 'feet' to 'ft', 'pounds' to 'lbs', 'horsepower' to 'HP'
-- Do not include brand name within the description (already prepended)
-- Respond with only JSON: {"title": "..."}
+- Respond with ONLY raw JSON, no markdown, no code fences: {"title": "..."}
 
 Product Data:
 {PRODUCT_DATA}
 `
 
 async function generateTitle({ scrapedTitle, modelNumber, productType }) {
-    const productData = JSON.stringify({ brand: VENDOR, model: modelNumber, product_type: productType, scraped_title: scrapedTitle }, null, 2)
+    const productData = JSON.stringify(
+        { brand: VENDOR, model: modelNumber, product_type: productType, scraped_title: scrapedTitle },
+        null,
+        2
+    )
     const prompt = titlePrompt.replace('{PRODUCT_DATA}', productData)
-    const response = await openai.responses.create({ model: 'gpt-4o-mini', input: prompt })
+    const response = await openai.responses.create({ model: 'gpt-5.4', input: prompt })
+    // Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+    const raw = response.output_text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
     let title
     try {
-        const parsed = JSON.parse(response.output_text.trim())
+        const parsed = JSON.parse(raw)
         title = parsed.title || scrapedTitle
     } catch {
-        title = response.output_text.trim().replace(/^["']|["']$/g, '') || scrapedTitle
+        title = raw.replace(/^["']|["']$/g, '') || scrapedTitle
     }
     // Ensure model number is present — insert after "MechMaxx " if missing
     if (modelNumber && !title.includes(modelNumber)) {
         title = title.replace(/^MechMaxx\s*/i, `MechMaxx ${modelNumber} `)
     }
+    // Normalize abbreviations
+    title = title.replace(/\bE-start\b/gi, 'Electric Start')
     return title
 }
 
