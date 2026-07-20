@@ -1223,10 +1223,10 @@ async function main() {
                 },
             })
                 .then((result) => {
-                    if (result) console.log(`[${sku}] ✓ Generated ${result.length} filter values`)
+                    if (result) console.log(`[${supplierSku}] ✓ Generated ${result.length} filter values`)
                 })
                 .catch((err) => {
-                    console.error(`[${sku}] Failed to generate filters:`, err.message)
+                    console.error(`[${supplierSku}] Failed to generate filters:`, err.message)
                 })
         }
 
