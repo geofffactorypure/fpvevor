@@ -139,6 +139,39 @@ function extractWarrantyFromHtml(bodyHtml) {
     return null
 }
 
+// ── Title Prompt ─────────────────────────────────────────────────────────────
+const titlePrompt = `Generate an SEO-optimized product title for an authorized dealer listing.
+
+Title Rules:
+- Format: MechMaxx [model] [SEO optimized product description]
+- Include the model number right after "MechMaxx"
+- Keep it concise but descriptive (under 80 characters if possible)
+- Truncate units: 'inches' to 'in', 'feet' to 'ft', 'pounds' to 'lbs', 'horsepower' to 'HP'
+- Do not include brand name within the description (already prepended)
+- Respond with only JSON: {"title": "..."}
+
+Product Data:
+{PRODUCT_DATA}
+`
+
+async function generateTitle({ scrapedTitle, modelNumber, productType }) {
+    const productData = JSON.stringify({ brand: VENDOR, model: modelNumber, product_type: productType, scraped_title: scrapedTitle }, null, 2)
+    const prompt = titlePrompt.replace('{PRODUCT_DATA}', productData)
+    const response = await openai.responses.create({ model: 'gpt-4o-mini', input: prompt })
+    let title
+    try {
+        const parsed = JSON.parse(response.output_text.trim())
+        title = parsed.title || scrapedTitle
+    } catch {
+        title = response.output_text.trim().replace(/^["']|["']$/g, '') || scrapedTitle
+    }
+    // Ensure model number is present — insert after "MechMaxx " if missing
+    if (modelNumber && !title.includes(modelNumber)) {
+        title = title.replace(/^MechMaxx\s*/i, `MechMaxx ${modelNumber} `)
+    }
+    return title
+}
+
 // ── MechMaxx Product Scraper ─────────────────────────────────────────────────
 
 /**
@@ -951,11 +984,14 @@ async function main() {
             // CSV UPC takes priority; fall back to barcode scraped from product JSON
             const upc = csvUpc || scrapedResult.Barcode || ''
 
-            // Transform title: "Product Name, ModelNumber" → "Mech Maxx ModelNumber Product Name"
-            const escapedModel = modelNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-            const titleWithoutModel = scrapedResult.Title.replace(new RegExp(`,\\s*${escapedModel}\\s*$`), '').trim()
-            scrapedResult.Title = `${VENDOR} ${modelNumber} ${titleWithoutModel}`
-            scrapedResult.MetaDescription = `${scrapedResult.Title}. Brand new. ${scrapedResult.Warranty}. Authorized dealer. Free shipping, manufacturer direct.`
+            // AI-generate title using scraped title + model number as input
+            const aiTitle = await generateTitle({
+                scrapedTitle: scrapedResult.Title,
+                modelNumber,
+                productType,
+            })
+            scrapedResult.Title = aiTitle
+            scrapedResult.MetaDescription = `${aiTitle}. Brand new. ${scrapedResult.Warranty}. Authorized dealer. Free shipping, manufacturer direct.`
 
             console.log(`[${supplierSku}] Title: "${scrapedResult.Title}"`)
             console.log(
@@ -1044,7 +1080,7 @@ async function main() {
                         variantGid,
                         price: String(price),
                         unit_cost: String(cost),
-                        sku: modelNumber,
+                        sku: supplierSku,
                         barcode: upc,
                         weight: shippingWeight || undefined,
                         weightUnit: shippingWeight ? 'POUNDS' : undefined,
@@ -1190,7 +1226,7 @@ async function main() {
                     storeInfo
                 )
                 console.log(
-                    `[${supplierSku}] ✓ Variant updated (price: $${price}, cost: $${cost}, sku: ${modelNumber})`
+                    `[${supplierSku}] ✓ Variant updated (price: $${price}, cost: $${cost}, sku: ${supplierSku})`
                 )
             }
 
