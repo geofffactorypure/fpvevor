@@ -163,7 +163,11 @@ async function generateTitle({ scrapedTitle, modelNumber, productType }) {
     const prompt = titlePrompt.replace('{PRODUCT_DATA}', productData)
     const response = await openai.responses.create({ model: 'gpt-5.4', input: prompt })
     // Strip markdown code fences if present (```json ... ``` or ``` ... ```)
-    const raw = response.output_text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
+    const raw = response.output_text
+        .trim()
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```$/, '')
+        .trim()
     let title
     try {
         const parsed = JSON.parse(raw)
@@ -177,6 +181,9 @@ async function generateTitle({ scrapedTitle, modelNumber, productType }) {
     }
     // Normalize abbreviations
     title = title.replace(/\bE-start\b/gi, 'Electric Start')
+    // Normalize units with symbols
+    title = title.replace(/(\d+\.?\d*)\s*-?\s*(?:inch(?:es)?|in\.?)\b/gi, '$1"')
+    title = title.replace(/(\d+\.?\d*)\s*-?\s*(?:feet|foot|ft\.?)\b/gi, "$1'")
     return title
 }
 
