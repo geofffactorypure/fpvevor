@@ -871,14 +871,58 @@ async function main() {
     const pool = createPool()
 
     try {
-        // 1. Load the MechMaxx CSV
-        console.log('Loading Mech Maxx product CSV...')
-        const csvPath = new URL('./Mech_Maxx_product_import_template.csv', import.meta.url)
-        const csvContent = fs.readFileSync(csvPath, 'utf-8')
-        const csvRows = parse(csvContent, {
+        // 1. Load the new MechMaxx latest CSV (mechmaxxlatest.csv)
+        console.log('Loading Mech Maxx latest product CSV...')
+        const latestCsvPath = new URL('./mechmaxxlatest.csv', import.meta.url)
+        const latestCsvContent = fs.readFileSync(latestCsvPath, 'utf-8')
+        const latestRows = parse(latestCsvContent, {
             columns: true,
             skip_empty_lines: true,
             relax_column_count: true,
+            bom: true,
+        })
+
+        // Load mechmaxx_products.csv as a SKU → handle/product_type lookup
+        console.log('Loading Mech Maxx products CSV for URL/type lookup...')
+        const productsCsvPath = new URL('./mechmaxx_products.csv', import.meta.url)
+        const productsRows = parse(fs.readFileSync(productsCsvPath, 'utf-8'), {
+            columns: true,
+            skip_empty_lines: true,
+            relax_column_count: true,
+        })
+        const skuProductMap = new Map()
+        for (const p of productsRows) {
+            const pSku = p.sku?.trim()
+            if (pSku) skuProductMap.set(pSku, p)
+        }
+
+        // Transform new CSV rows to the shape expected by listOneProduct
+        const csvRows = latestRows.map((row) => {
+            const sku = row['SKU']?.trim()
+            const product = skuProductMap.get(sku)
+            if (!product) console.warn(`[${sku}] SKU not found in mechmaxx_products.csv — will be skipped`)
+            const handle = product?.handle?.trim()
+            return {
+                'Shopify SKU': sku,
+                'Model Number': row['Model Number']?.trim() || '',
+                'UPC': '',
+                'Manufacturer Weblink': handle ? `https://mechmaxx.com/products/${handle}` : '',
+                'Product Type': product?.product_type?.trim() || '',
+                'Cost': row['Dealer Price']?.trim() || '',
+                'Lowest Price': row['Platform Selling Price']?.trim() || '',
+                'MAP Price': '',
+                'MSRP': '',
+                'Shipping Weight': '',
+                'Shipping Length': '',
+                'Shipping Width': '',
+                'Shipping Height': '',
+                'Shipping Fee': '',
+                'Shipping Class': '',
+                'Shipping NMFC': '',
+                'Shipping Sub': '',
+                'Shipping Additional Info': '',
+                'Shipping Method': '',
+            }
         })
 
         // Filter by product type if specified
@@ -987,8 +1031,7 @@ async function main() {
             const mapPrice = parseFloat((row['MAP Price'] || '').replace(/[^0-9.]/g, '')) || 0
             const msrp = parseFloat((row['MSRP'] || '').replace(/[^0-9.]/g, '')) || 0
             // Lowest Price is the floor/MAP; fall back to MAP Price then MSRP
-            const priceRaw = parseFloat((row['Lowest Price'] || '').replace(/[^0-9.]/g, '')) || mapPrice || msrp || 0
-            const price = priceRaw
+            const price = parseFloat((row['Lowest Price'] || '').replace(/[^0-9.]/g, '')) || mapPrice || msrp || 0
             const cost = costRaw
 
             console.log(`[${supplierSku}] Starting... (${productUrl})`)
