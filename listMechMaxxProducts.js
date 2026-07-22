@@ -542,6 +542,12 @@ async function getFileUrl(storeInfo, fileId) {
     return res.data.node.url
 }
 
+// Strip newlines/tabs so strings are safe for single_line_text_field metafields
+function sanitizeSingleLine(val) {
+    if (typeof val !== 'string') return val
+    return val.replace(/[\r\n\t]+/g, ' ').trim()
+}
+
 async function createShopifyProduct({ scrapedResult, product_type, vendor, sku, storeInfo, pool }) {
     const media =
         scrapedResult.Media?.map((m) => ({
@@ -640,37 +646,37 @@ async function createShopifyProduct({ scrapedResult, product_type, vendor, sku, 
             {
                 namespace: 'custom',
                 key: 'warranty',
-                value: scrapedResult.Warranty,
+                value: sanitizeSingleLine(scrapedResult.Warranty),
                 type: 'single_line_text_field',
             },
             {
                 namespace: 'custom',
                 key: 'manuals',
-                value: JSON.stringify(uploadedManuals),
+                value: JSON.stringify(uploadedManuals.map(sanitizeSingleLine)),
                 type: 'list.single_line_text_field',
             },
             {
                 namespace: 'custom',
                 key: 'package_contents',
-                value: JSON.stringify(scrapedResult.PackageContents || []),
+                value: JSON.stringify((scrapedResult.PackageContents || []).map(sanitizeSingleLine)),
                 type: 'list.single_line_text_field',
             },
             {
                 namespace: 'custom',
                 key: 'checkmarks',
-                value: JSON.stringify(scrapedResult.Checkmarks),
+                value: JSON.stringify(scrapedResult.Checkmarks.map(sanitizeSingleLine)),
                 type: 'list.single_line_text_field',
             },
             {
                 namespace: 'custom',
                 key: 'specifications',
-                value: JSON.stringify(scrapedResult.Specifications),
+                value: JSON.stringify(scrapedResult.Specifications.map(sanitizeSingleLine)),
                 type: 'list.single_line_text_field',
             },
             {
                 namespace: 'custom',
                 key: 'features',
-                value: JSON.stringify(scrapedResult.Features),
+                value: JSON.stringify(scrapedResult.Features.map(sanitizeSingleLine)),
                 type: 'list.single_line_text_field',
             },
         ],
