@@ -113,6 +113,25 @@ async function updateShopifyMetafields(storeInfo, metafields) {
     }
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Extract the mechmaxx.com product handle from a variant's custom_weblinks JSON.
+ * Stored as: [{ link: "https://mechmaxx.com/products/{handle}", title: "..." }]
+ */
+function getMechMaxxHandle(customWeblinks) {
+    if (!customWeblinks) return null
+    try {
+        const links = JSON.parse(customWeblinks)
+        const link = links.find((w) => typeof w.link === 'string' && w.link.includes('mechmaxx.com/products/'))
+        if (!link) return null
+        const m = link.link.match(/mechmaxx\.com\/products\/([^/?#]+)/)
+        return m ? m[1] : null
+    } catch {
+        return null
+    }
+}
+
 // ── Scraping ──────────────────────────────────────────────────────────────────
 
 /**
@@ -195,10 +214,10 @@ async function main() {
         // 2. Get all MechMaxx products matching the filter
         let productQuery = `
             SELECT p.id, p.title, p.handle, p.product_type, p.admin_graphql_api_id,
-                   vn.sku
+                   vn.sku, vn.custom_weblinks
             FROM products p
             JOIN variants_new vn ON vn.product_id = p.id
-            WHERE p.vendor = ? AND p.store_id = ? AND vn.sku IS NOT NULL AND p.handle IS NOT NULL
+            WHERE p.vendor = ? AND p.store_id = ? AND vn.sku IS NOT NULL
         `
         const queryArgs = [VENDOR, STORE_ID]
         if (PRODUCT_TYPE_FILTER) {
@@ -211,20 +230,22 @@ async function main() {
         console.log(`Found ${allMatchingProducts.length} MechMaxx product(s)`)
         if (allMatchingProducts.length === 0) return
 
-        // 3. Build handle → product map across all matching products
-        //    (group members may span product types, so also load all MechMaxx handles)
+        // 3. Build mechmaxx.com handle → product map across ALL MechMaxx products
+        //    (group members may span product types; handles come from custom_weblinks)
         const allMechMaxx = await query(
             pool,
-            `SELECT p.id, p.title, p.handle, p.product_type, p.admin_graphql_api_id, vn.sku
+            `SELECT p.id, p.title, p.handle, p.product_type, p.admin_graphql_api_id, vn.sku, vn.custom_weblinks
              FROM products p
              JOIN variants_new vn ON vn.product_id = p.id
-             WHERE p.vendor = ? AND p.store_id = ? AND p.handle IS NOT NULL`,
+             WHERE p.vendor = ? AND p.store_id = ?`,
             [VENDOR, STORE_ID]
         )
-        const handleToProduct = new Map()
+        const mechmaxxHandleToProduct = new Map()
         for (const p of allMechMaxx) {
-            handleToProduct.set(p.handle, p)
+            const mxHandle = getMechMaxxHandle(p.custom_weblinks)
+            if (mxHandle) mechmaxxHandleToProduct.set(mxHandle, p)
         }
+        console.log(`Built mechmaxx handle map for ${mechmaxxHandleToProduct.size} product(s)`)
 
         // 4. Get already-grouped product IDs to avoid re-grouping
         const alreadyGrouped = await query(pool, `SELECT product_id FROM group_product_links WHERE store_id = ?`, [
@@ -245,12 +266,20 @@ async function main() {
             console.log(`\n─── ${product.title.slice(0, 70)} ───`)
             console.log(`  SKU: ${product.sku}`)
 
+            // Get mechmaxx.com handle from stored weblink
+            const mechmaxxHandle = getMechMaxxHandle(product.custom_weblinks)
+            if (!mechmaxxHandle) {
+                console.log(`  → Skip: no mechmaxx.com weblink stored for this product`)
+                processedProductIds.add(product.id)
+                continue
+            }
+
             // Scrape the MechMaxx page (use cache)
-            let members = scrapedHandles.get(product.handle)
+            let members = scrapedHandles.get(mechmaxxHandle)
             if (members === undefined) {
                 try {
-                    members = await scrapeModelGroup(product.handle)
-                    scrapedHandles.set(product.handle, members)
+                    members = await scrapeModelGroup(mechmaxxHandle)
+                    scrapedHandles.set(mechmaxxHandle, members)
                 } catch (err) {
                     console.error(`  ✗ Scrape failed: ${err.message}`)
                     processedProductIds.add(product.id)
@@ -265,14 +294,14 @@ async function main() {
                 continue
             }
 
-            // Match scraped handles to DB products
+            // Match scraped mechmaxx.com handles to DB products
             const matchedProducts = []
             for (const { handle, label } of members) {
-                const dbProduct = handleToProduct.get(handle)
+                const dbProduct = mechmaxxHandleToProduct.get(handle)
                 if (dbProduct) {
                     matchedProducts.push({ ...dbProduct, modelLabel: label })
                 } else {
-                    console.log(`    [MISS] Handle "${handle}" not found in DB`)
+                    console.log(`    [MISS] mechmaxx handle "${handle}" not in DB`)
                 }
             }
 

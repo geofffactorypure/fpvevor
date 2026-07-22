@@ -102,15 +102,34 @@ async function shopifyGraphQL(storeInfo, queryStr, variables, retries = 3) {
         }
     }
 }
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
+/**
+ * Extract the mechmaxx.com product handle from a variant's custom_weblinks JSON.
+ * Stored as: [{ link: "https://mechmaxx.com/products/{handle}", title: "..." }]
+ */
+function getMechMaxxHandle(customWeblinks) {
+    if (!customWeblinks) return null
+    try {
+        const links = JSON.parse(customWeblinks)
+        const link = links.find((w) => typeof w.link === 'string' && w.link.includes('mechmaxx.com/products/'))
+        if (!link) return null
+        const m = link.link.match(/mechmaxx\.com\/products\/([^/?#]+)/)
+        return m ? m[1] : null
+    } catch {
+        return null
+    }
+}
 // ── Scraping ──────────────────────────────────────────────────────────────────
 
 /**
  * Scrape the "Frequently Bought Together" cross-sell handles from a MechMaxx product page.
  * Parses .bought-together-right .top-title-item anchor hrefs.
- * Returns handles of cross-sell products, excluding the current product itself.
+ * @param {string} mechmaxxHandle - The mechmaxx.com product handle (from custom_weblinks)
+ * Returns mechmaxx.com handles of cross-sell products, excluding the current product itself.
  */
-async function scrapeFbtHandles(productHandle) {
+async function scrapeFbtHandles(mechmaxxHandle) {
+    const productHandle = mechmaxxHandle
     const url = `${MECHMAXX_BASE}/products/${productHandle}`
     const res = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(15000) })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -179,10 +198,10 @@ async function main() {
         // 2. Get MechMaxx products to process (filtered by type if specified)
         let productQuery = `
             SELECT p.id, p.title, p.handle, p.product_type, p.admin_graphql_api_id,
-                   vn.sku
+                   vn.sku, vn.custom_weblinks
             FROM products p
             JOIN variants_new vn ON vn.product_id = p.id
-            WHERE p.vendor = ? AND p.store_id = ? AND vn.sku IS NOT NULL AND p.handle IS NOT NULL
+            WHERE p.vendor = ? AND p.store_id = ? AND vn.sku IS NOT NULL
         `
         const queryArgs = [VENDOR, STORE_ID]
         if (PRODUCT_TYPE_FILTER) {
@@ -199,23 +218,28 @@ async function main() {
             return
         }
 
-        // 3. Build handle → { id, gid } lookup across ALL MechMaxx products
-        //    (cross-sells may reference products not in the current type filter)
+        // 3. Build mechmaxx.com handle → { id, gid } lookup across ALL MechMaxx products
+        //    (cross-sells may reference products not in the current type filter;
+        //     handles come from custom_weblinks, not our Shopify handle)
         const allMechMaxx = await query(
             pool,
-            `SELECT p.id, p.handle, p.admin_graphql_api_id
+            `SELECT p.id, p.handle, p.admin_graphql_api_id, vn.custom_weblinks
              FROM products p
-             WHERE p.vendor = ? AND p.store_id = ? AND p.handle IS NOT NULL`,
+             JOIN variants_new vn ON vn.product_id = p.id
+             WHERE p.vendor = ? AND p.store_id = ?`,
             [VENDOR, STORE_ID]
         )
-        const handleToProduct = new Map()
+        const mechmaxxHandleToProduct = new Map()
         for (const p of allMechMaxx) {
-            handleToProduct.set(p.handle, {
-                id: p.id,
-                gid: p.admin_graphql_api_id || `gid://shopify/Product/${p.id}`,
-            })
+            const mxHandle = getMechMaxxHandle(p.custom_weblinks)
+            if (mxHandle) {
+                mechmaxxHandleToProduct.set(mxHandle, {
+                    id: p.id,
+                    gid: p.admin_graphql_api_id || `gid://shopify/Product/${p.id}`,
+                })
+            }
         }
-        console.log(`Built handle map for ${handleToProduct.size} MechMaxx products`)
+        console.log(`Built mechmaxx handle map for ${mechmaxxHandleToProduct.size} product(s)`)
 
         // 4. Build product_type → collection_id for compare filtering
         const productTypes = [...new Set(products.map((p) => p.product_type).filter(Boolean))]
@@ -266,8 +290,16 @@ async function main() {
                     const { sku, handle, admin_graphql_api_id, title, id } = product
 
                     try {
+                        // Get mechmaxx.com handle from stored weblink
+                        const mechmaxxHandle = getMechMaxxHandle(product.custom_weblinks)
+                        if (!mechmaxxHandle) {
+                            console.log(`  [${sku}] Skip: no mechmaxx.com weblink stored`)
+                            skipCount++
+                            return
+                        }
+
                         // Scrape FBT cross-sell handles from MechMaxx product page
-                        const crossSellHandles = await scrapeFbtHandles(handle)
+                        const crossSellHandles = await scrapeFbtHandles(mechmaxxHandle)
 
                         if (crossSellHandles.length === 0) {
                             console.log(`  [${sku}] Skip: no FBT section found`)
@@ -276,11 +308,11 @@ async function main() {
                             return
                         }
 
-                        // Resolve handles to GIDs (only products in our DB)
+                        // Resolve mechmaxx.com handles to GIDs (only products in our DB)
                         const crossSellGids = [
                             ...new Set(
                                 crossSellHandles
-                                    .map((h) => handleToProduct.get(h))
+                                    .map((h) => mechmaxxHandleToProduct.get(h))
                                     .filter(Boolean)
                                     .map((p) => p.gid)
                             ),
