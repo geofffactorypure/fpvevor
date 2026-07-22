@@ -896,22 +896,42 @@ async function main() {
             if (pSku) skuProductMap.set(pSku, p)
         }
 
+        // Load mechmaxx_sku_type_mapping.csv if available for proper product types
+        const skuTypeMappingPath = new URL('./mechmaxx_sku_type_mapping.csv', import.meta.url)
+        const skuTypeMap = new Map()
+        if (fs.existsSync(skuTypeMappingPath)) {
+            const typeMappingRows = parse(fs.readFileSync(skuTypeMappingPath, 'utf-8'), {
+                columns: true,
+                skip_empty_lines: true,
+                relax_column_count: true,
+            })
+            for (const r of typeMappingRows) {
+                const s = r['SKU']?.trim()
+                const t = r['Mapped Product Type']?.trim()
+                if (s && t) skuTypeMap.set(s, t)
+            }
+            console.log(`Loaded ${skuTypeMap.size} SKU→type mappings from mechmaxx_sku_type_mapping.csv`)
+        } else {
+            console.warn('mechmaxx_sku_type_mapping.csv not found — run aiMechMaxxTypeMerge.js to generate it')
+        }
+
         // Transform new CSV rows to the shape expected by listOneProduct
         const csvRows = latestRows.map((row) => {
             const sku = row['SKU']?.trim()
             const product = skuProductMap.get(sku)
             if (!product) console.warn(`[${sku}] SKU not found in mechmaxx_products.csv — will be skipped`)
             const handle = product?.handle?.trim()
+            const productType = skuTypeMap.get(sku) || product?.product_type?.trim() || ''
             return {
                 'Shopify SKU': sku,
                 'Model Number': row['Model Number']?.trim() || '',
-                'UPC': '',
+                UPC: '',
                 'Manufacturer Weblink': handle ? `https://mechmaxx.com/products/${handle}` : '',
-                'Product Type': product?.product_type?.trim() || '',
-                'Cost': row['Dealer Price']?.trim() || '',
+                'Product Type': productType,
+                Cost: row['Dealer Price']?.trim() || '',
                 'Lowest Price': row['Platform Selling Price']?.trim() || '',
                 'MAP Price': '',
-                'MSRP': '',
+                MSRP: '',
                 'Shipping Weight': '',
                 'Shipping Length': '',
                 'Shipping Width': '',
