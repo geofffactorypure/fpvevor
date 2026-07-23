@@ -146,9 +146,9 @@ function parseCopyHtml(copyHtml) {
         const list = h.nextElementSibling
         if (!list || list.tagName !== 'UL') continue
 
-        const items = Array.from(list.querySelectorAll('li')).map((li) =>
-            li.textContent?.replace(/\s+/g, ' ').trim()
-        ).filter(Boolean)
+        const items = Array.from(list.querySelectorAll('li'))
+            .map((li) => li.textContent?.replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
 
         if (text?.includes('SPECIFICATION')) {
             specifications.push(...items)
@@ -1174,7 +1174,7 @@ async function main() {
                         unit_cost: String(cost),
                         sku,
                         barcode: upc,
-                        tracked: true,
+                        tracked: false,
                         metafields: [
                             { namespace: 'custom', key: 'upc', value: upc, type: 'single_line_text_field' },
                             {
