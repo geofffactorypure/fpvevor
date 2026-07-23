@@ -977,9 +977,10 @@ async function main() {
                 //   - No MAP (or MAP fell through) → try 5% discount off MSRP if margin >= 15%,
                 //     otherwise use full MSRP
                 // Hard 10% margin floor — skip the product entirely if even MSRP can't clear it.
-                const discounted = Math.round(msrp * 0.95 * 100) / 100
+                const maxDiscount = Math.min(msrp * 0.05, 10)
+                const discounted = Math.round(msrp - maxDiscount) // whole dollar, capped at $10 off
                 const discountedMargin = discounted > 0 ? (discounted - dealerPrice - shippingCost) / discounted : 0
-                const msrpFallback = discountedMargin >= 0.15 ? discounted : msrp
+                const msrpFallback = discountedMargin >= 0.15 ? discounted : Math.round(msrp)
 
                 let price
                 if (dealerMap > 0) {
@@ -989,7 +990,7 @@ async function main() {
                     price = msrpFallback
                 }
 
-                const margin = price > 0 ? (price - dealerPrice - shippingCost) / price : 0
+                const margin = price > 0 ? Math.round(((price - dealerPrice - shippingCost) / price) * 10000) / 10000 : 0
 
                 // Product type from mapping CSV; fall back to empty (no type)
                 const productType = skuTypeMap.get(sku) || ''
