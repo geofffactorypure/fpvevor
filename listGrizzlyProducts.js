@@ -352,6 +352,9 @@ async function generateTitle({ scrapedTitle, modelNumber, productType, vendor })
     if (modelNumber && !title.includes(modelNumber)) {
         title = title.replace(new RegExp(`^${vendor}\\s*`, 'i'), `${vendor} ${modelNumber} `)
     }
+    // Normalize units with symbols
+    title = title.replace(/(\d+\.?\d*)\s*-?\s*(?:inch(?:es)?|in\.?)\b/gi, '$1"')
+    title = title.replace(/(\d+\.?\d*)\s*-?\s*(?:feet|foot|ft\.?)\b/gi, "$1'")
     return title
 }
 
@@ -990,7 +993,8 @@ async function main() {
                     price = msrpFallback
                 }
 
-                const margin = price > 0 ? Math.round(((price - dealerPrice - shippingCost) / price) * 10000) / 10000 : 0
+                const margin =
+                    price > 0 ? Math.round(((price - dealerPrice - shippingCost) / price) * 10000) / 10000 : 0
 
                 // Product type from mapping CSV; fall back to empty (no type)
                 const productType = skuTypeMap.get(sku) || ''
