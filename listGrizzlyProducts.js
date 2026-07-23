@@ -959,6 +959,7 @@ async function main() {
         }
 
         // 3. Filter and transform CSV rows
+        const MIN_MARGIN = 0.1
         const allRows = csvRows
             .map((row) => {
                 const sku = row['Item Number']?.trim()
@@ -976,7 +977,6 @@ async function main() {
                 //   - No MAP (or MAP fell through) → try 5% discount off MSRP if margin >= 15%,
                 //     otherwise use full MSRP
                 // Hard 10% margin floor — skip the product entirely if even MSRP can't clear it.
-                const MIN_MARGIN = 0.1
                 const discounted = Math.round(msrp * 0.95 * 100) / 100
                 const discountedMargin = discounted > 0 ? (discounted - dealerPrice - shippingCost) / discounted : 0
                 const msrpFallback = discountedMargin >= 0.15 ? discounted : msrp
