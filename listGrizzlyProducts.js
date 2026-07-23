@@ -121,18 +121,27 @@ function parseCopyHtml(copyHtml) {
     // Remove h1 entirely (redundant with the product title)
     doc.querySelectorAll('h1').forEach((el) => el.remove())
 
-    // Demote h2 → p so it renders as normal body text, not a bold heading
-    doc.querySelectorAll('h2').forEach((el) => {
+    // Demote h2/h3 → p so they render as normal body text, not bold headings
+    doc.querySelectorAll('h2, h3').forEach((el) => {
         const p = doc.createElement('p')
         p.innerHTML = el.innerHTML
         el.replaceWith(p)
     })
 
+    // Strip all links — keep link text, remove the anchor (no external grizzly.com refs)
+    doc.querySelectorAll('a').forEach((el) => {
+        el.replaceWith(doc.createTextNode(el.textContent || ''))
+    })
+
     // Strip boilerplate sentences that add no product value
     const BOILERPLATE = [
         /customer service and technical support teams? are u\.s\.-based/i,
+        /u\.s\.-based customer service/i,
+        /need help\?/i,
         /written by our u\.s\.-based documentation department/i,
         /made in an iso 9001 factory/i,
+        /like all .+products.+warranty/i,
+        /parts and accessories for .+products are available/i,
     ]
     doc.querySelectorAll('p').forEach((el) => {
         const text = el.textContent?.trim() || ''
@@ -161,10 +170,11 @@ function parseCopyHtml(copyHtml) {
         }
     }
 
-    const descriptionHtml = doc.body ? doc.body.innerHTML.trim() : copyHtml
+    // Return plain text for AI description generation (not raw HTML)
+    const copyText = doc.body?.textContent?.replace(/\s+/g, ' ').trim() || ''
 
     return {
-        descriptionHtml,
+        copyText,
         specifications,
         features,
     }
@@ -224,7 +234,7 @@ async function scrapeProductData(sku) {
     }))
 
     // Description, specs, features from Copy HTML
-    const { descriptionHtml, specifications, features } = parseCopyHtml(product.Copy || '')
+    const { copyText, specifications, features } = parseCopyHtml(product.Copy || '')
 
     // Manuals — construct predictable CDN URLs based on Resources flags
     const manuals = []
@@ -251,7 +261,7 @@ async function scrapeProductData(sku) {
     return {
         Title: title,
         ScrapedTitle: title,
-        Description: descriptionHtml,
+        Description: copyText,
         Warranty: warrantyLong,
         Manuals: manuals,
         PackageContents: [],
@@ -286,6 +296,37 @@ Title Rules:
 Product Data:
 {PRODUCT_DATA}
 `
+
+// ── Description Prompt ──────────────────────────────────────────────────────
+const descriptionPrompt = `Write a concise product description for an authorized dealer listing on an e-commerce site.
+
+Rules:
+- 2 to 4 short paragraphs of plain prose
+- Focus on what the product is, what it does, and who it is for
+- Do NOT mention warranty, customer service, replacement parts, documentation, or brand support
+- Do NOT use the brand name in every sentence
+- Do NOT use bullet points or headings
+- Return ONLY valid HTML using only <p> tags — no other HTML elements, no inline styles, no links
+
+Product Data:
+{PRODUCT_DATA}
+`
+
+async function generateDescription({ title, copyText, specifications, features }) {
+    const productData = JSON.stringify(
+        {
+            product_title: title,
+            raw_copy: copyText.slice(0, 2000),
+            specifications: specifications.slice(0, 20),
+            features: features.slice(0, 20),
+        },
+        null,
+        2
+    )
+    const prompt = descriptionPrompt.replace('{PRODUCT_DATA}', productData)
+    const response = await openai.responses.create({ model: 'gpt-5.4', input: prompt })
+    return response.output_text.trim()
+}
 
 async function generateTitle({ scrapedTitle, modelNumber, productType, vendor }) {
     const productData = JSON.stringify(
@@ -930,17 +971,25 @@ async function main() {
                 const shippingCost = parseFloat((row['Dealer Shipping Cost'] || '').replace(/[^0-9.]/g, '')) || 0
 
                 // Pricing rules:
-                //   - MAP present → must use MAP exactly (no undercutting allowed)
-                //   - No MAP → try a 5% discount off MSRP; only apply if resulting margin >= 15%,
-                //     otherwise fall back to full MSRP
+                //   - MAP present AND clears 10% margin → use MAP
+                //   - MAP present but below 10% margin → fall through to MSRP undercut rules
+                //   - No MAP (or MAP fell through) → try 5% discount off MSRP if margin >= 15%,
+                //     otherwise use full MSRP
+                // Hard 10% margin floor — skip the product entirely if even MSRP can't clear it.
+                const MIN_MARGIN = 0.1
+                const discounted = Math.round(msrp * 0.95 * 100) / 100
+                const discountedMargin = discounted > 0 ? (discounted - dealerPrice - shippingCost) / discounted : 0
+                const msrpFallback = discountedMargin >= 0.15 ? discounted : msrp
+
                 let price
                 if (dealerMap > 0) {
-                    price = dealerMap
+                    const mapMargin = dealerMap > 0 ? (dealerMap - dealerPrice - shippingCost) / dealerMap : 0
+                    price = mapMargin >= MIN_MARGIN ? dealerMap : msrpFallback
                 } else {
-                    const discounted = Math.round(msrp * 0.95 * 100) / 100
-                    const discountedMargin = discounted > 0 ? (discounted - dealerPrice - shippingCost) / discounted : 0
-                    price = discountedMargin >= 0.15 ? discounted : msrp
+                    price = msrpFallback
                 }
+
+                const margin = price > 0 ? (price - dealerPrice - shippingCost) / price : 0
 
                 // Product type from mapping CSV; fall back to empty (no type)
                 const productType = skuTypeMap.get(sku) || ''
@@ -960,12 +1009,18 @@ async function main() {
                     productType,
                     discontinued: row['Discontinued']?.trim().toLowerCase() === 'true',
                     itemStatus: row['Item Status']?.trim(),
+                    margin,
                 }
             })
             .filter((row) => {
                 if (!row.sku) return false
                 // Apply brand filter if specified
                 if (BRAND_FILTER && row.vendor !== BRAND_FILTER) return false
+                // Hard 10% margin floor — skip anything that can't clear it
+                if (row.margin < MIN_MARGIN) {
+                    console.warn(`[${row.sku}] Skipping — margin ${(row.margin * 100).toFixed(1)}% is below 10% floor`)
+                    return false
+                }
                 return true
             })
 
@@ -1078,6 +1133,14 @@ async function main() {
             })
             scrapedResult.Title = aiTitle
             scrapedResult.MetaDescription = `${aiTitle}. Brand new. ${scrapedResult.Warranty}. Authorized dealer. Free shipping, manufacturer direct.`
+
+            // AI-generate description
+            scrapedResult.Description = await generateDescription({
+                title: aiTitle,
+                copyText: scrapedResult.Description,
+                specifications: scrapedResult.Specifications,
+                features: scrapedResult.Features,
+            })
 
             console.log(`[${sku}] Title: "${scrapedResult.Title}"`)
             console.log(
