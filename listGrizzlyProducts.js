@@ -183,35 +183,41 @@ function parseCopyHtml(copyHtml) {
 /**
  * Scrape all listing data for a Grizzly product from grizzly.com.
  *
- * Uses the direct-item-number URL pattern:
- *   https://www.grizzly.com/products/x/{sku-lowercase}
- * which the server redirects to the canonical product URL.
+ * Tries /products/x/{sku} first; if that page has no window.product or returns
+ * a non-OK status, falls back to /parts/{sku}.  Throws if neither URL yields
+ * parseable product data or if the resolved page has no description text.
  *
  * Product data is extracted from the embedded window.product JSON object.
  */
-async function scrapeProductData(sku) {
-    const url = `https://www.grizzly.com/products/x/${sku.toLowerCase()}`
-
+async function fetchProductJson(url) {
     const pageRes = await fetch(url, {
         headers: { 'User-Agent': GRIZZLY_UA },
         signal: AbortSignal.timeout(20000),
         redirect: 'follow',
     })
-    if (!pageRes.ok) throw new Error(`Failed to fetch product page (${pageRes.status}): ${url}`)
-
+    if (!pageRes.ok) return null
     const pageHtml = await pageRes.text()
     const canonicalUrl = pageRes.url
-
-    // Extract window.product JSON
     const productMatch = pageHtml.match(/window\.product=(\{[\s\S]*?\});(?:window\.|<\/script>)/)
-    if (!productMatch) throw new Error(`Could not find window.product JSON for SKU: ${sku}`)
-
-    let product
+    if (!productMatch) return null
     try {
-        product = JSON.parse(productMatch[1])
-    } catch (err) {
-        throw new Error(`Failed to parse window.product JSON for SKU ${sku}: ${err.message}`)
+        return { product: JSON.parse(productMatch[1]), canonicalUrl }
+    } catch {
+        return null
     }
+}
+
+async function scrapeProductData(sku) {
+    const skuLower = sku.toLowerCase()
+
+    let parsed = await fetchProductJson(`https://www.grizzly.com/products/x/${skuLower}`)
+    if (!parsed) {
+        console.log(`[${sku}] Not found at /products/x/ — trying /parts/`)
+        parsed = await fetchProductJson(`https://www.grizzly.com/parts/${skuLower}`)
+    }
+    if (!parsed) throw new Error(`Could not find product data for SKU: ${sku}`)
+
+    const { product, canonicalUrl } = parsed
 
     const title = `${product.Brand?.Name || 'Grizzly'} ${product.Sku} - ${product.Name}`.trim()
     const upc = product.Upc?.trim() || ''
@@ -235,6 +241,7 @@ async function scrapeProductData(sku) {
 
     // Description, specs, features from Copy HTML
     const { copyText, specifications, features } = parseCopyHtml(product.Copy || '')
+    if (!copyText) throw new Error(`No description found for SKU: ${sku} — skipping`)
 
     // Manuals — construct predictable CDN URLs based on Resources flags
     const manuals = []
