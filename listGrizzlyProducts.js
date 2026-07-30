@@ -744,7 +744,7 @@ async function createShopifyProduct({ scrapedResult, product_type, vendor, sku, 
                     id
                     title
                     variants(first: 1) {
-                        nodes { id }
+                        nodes { id inventoryItem { id } }
                     }
                 }
                 userErrors { field message }
@@ -805,6 +805,30 @@ async function createListingEvent(pool, event) {
          VALUES (${keys.map(() => '?').join(', ')})`,
         values
     )
+}
+
+const DEFAULT_LOCATION_INVENTORY_ID = 'gid://shopify/Location/649429017'
+
+async function setInventoryQuantity({ storeInfo, inventoryItemId, locationId, quantity }) {
+    const data = await shopifyGraphQL(
+        storeInfo,
+        `mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+            inventorySetQuantities(input: $input) {
+                inventoryAdjustmentGroup { id }
+                userErrors { field message }
+            }
+        }`,
+        {
+            input: {
+                name: 'available',
+                reason: 'correction',
+                ignoreCompareQuantity: true,
+                quantities: [{ inventoryItemId, locationId, quantity }],
+            },
+        }
+    )
+    const errors = data.inventorySetQuantities?.userErrors
+    if (errors?.length > 0) throw new Error(`Inventory set errors: ${JSON.stringify(errors)}`)
 }
 
 // ── Filter Generation ───────────────────────────────────────────────────────
@@ -927,10 +951,20 @@ async function generateFiltersForNewProduct({ pool, productId, productType, prod
 async function main() {
     const pool = createPool()
 
+    // Shipping chart lookup: when Dealer Shipping Cost is "See Chart",
+    // look up the flat fee based on dealer price (order merchandise total)
+    function lookupShippingCost(dealerPrice) {
+        if (dealerPrice >= 150) return 0
+        if (dealerPrice >= 100) return 21.99
+        if (dealerPrice >= 50) return 18.99
+        if (dealerPrice >= 15) return 16.99
+        return 8.99
+    }
+
     try {
-        // 1. Load grizzly.csv
-        console.log('Loading grizzly.csv...')
-        const csvPath = new URL('./grizzly.csv', import.meta.url)
+        // 1. Load griz_price_list.csv (row 1 is metadata; row 2 is headers)
+        console.log('Loading griz_price_list.csv...')
+        const csvPath = new URL('./griz_price_list.csv', import.meta.url)
         const csvContent = fs.readFileSync(csvPath, 'utf-8')
         const csvRows = parse(csvContent, {
             columns: true,
@@ -938,6 +972,7 @@ async function main() {
             relax_column_count: true,
             relax_quotes: true,
             bom: true,
+            from_line: 2,
         })
 
         // 2. Load grizzly_sku_type_mapping.csv if available
@@ -962,7 +997,7 @@ async function main() {
         }
 
         // 3. Filter and transform CSV rows
-        const MIN_MARGIN = 0.1
+        const MIN_MARGIN = 0.07
         const allRows = csvRows
             .map((row) => {
                 const sku = row['Item Number']?.trim()
@@ -972,7 +1007,11 @@ async function main() {
                 const msrp = parseFloat((row['MSRP'] || '').replace(/[^0-9.]/g, '')) || 0
                 const dealerMap = parseFloat((row['Dealer MAP'] || '').replace(/[^0-9.]/g, '')) || 0
                 const dealerPrice = parseFloat((row['Dealer Price'] || '').replace(/[^0-9.]/g, '')) || 0
-                const shippingCost = parseFloat((row['Dealer Shipping Cost'] || '').replace(/[^0-9.]/g, '')) || 0
+                const rawShipping = (row['Dealer Shipping Cost'] || '').trim()
+                const shippingCost =
+                    rawShipping.toLowerCase() === 'see chart'
+                        ? lookupShippingCost(dealerPrice)
+                        : parseFloat(rawShipping.replace(/[^0-9.]/g, '')) || 0
 
                 // Pricing rules:
                 //   - MAP present AND clears 10% margin → use MAP
@@ -1019,11 +1058,16 @@ async function main() {
             })
             .filter((row) => {
                 if (!row.sku) return false
+                // Whitelist — only list brands we carry
+                const ALLOWED_VENDORS = new Set(['Grizzly', 'Shop Fox', 'South Bend'])
+                if (!ALLOWED_VENDORS.has(row.vendor)) return false
+                // Skip discontinued items
+                if (row.discontinued) return false
                 // Apply brand filter if specified
                 if (BRAND_FILTER && row.vendor !== BRAND_FILTER) return false
-                // Hard 10% margin floor — skip anything that can't clear it
+                // Hard 7% margin floor — skip anything that can't clear it
                 if (row.margin < MIN_MARGIN) {
-                    console.warn(`[${row.sku}] Skipping — margin ${(row.margin * 100).toFixed(1)}% is below 10% floor`)
+                    console.warn(`[${row.sku}] Skipping — margin ${(row.margin * 100).toFixed(1)}% is below 7% floor`)
                     return false
                 }
                 return true
@@ -1101,12 +1145,14 @@ async function main() {
             }
         }
 
-        // 8. Get publications (sales channels)
+        // 8. Get publications (sales channels) and primary location
         const publications = await getPublications(storeInfo).catch((err) => {
             console.error('Failed to retrieve publications:', err.message)
             return []
         })
         console.log(`Found ${publications.length} sales channel(s)`)
+
+        const locationId = DEFAULT_LOCATION_INVENTORY_ID
 
         // 9. List products
         const toList = toProcess.slice(0, LIMIT)
@@ -1116,7 +1162,20 @@ async function main() {
         let failCount = 0
 
         async function listOneProduct(row) {
-            const { sku, vendor, price, cost, msrp, mapPrice, shippingFee, shipType, productType, upc: csvUpc } = row
+            const {
+                sku,
+                vendor,
+                price,
+                cost,
+                msrp,
+                mapPrice,
+                shippingFee,
+                shipType,
+                productType,
+                upc: csvUpc,
+                itemStatus,
+            } = row
+            const inventoryQty = (itemStatus || '').toLowerCase() === 'available' ? 100 : 0
 
             console.log(`[${sku}] Starting... (vendor: ${vendor})`)
 
@@ -1242,7 +1301,7 @@ async function main() {
                         unit_cost: String(cost),
                         sku,
                         barcode: upc,
-                        tracked: false,
+                        tracked: true,
                         metafields: [
                             { namespace: 'custom', key: 'upc', value: upc, type: 'single_line_text_field' },
                             {
@@ -1354,6 +1413,15 @@ async function main() {
                     storeInfo
                 )
                 console.log(`[${sku}] ✓ Variant updated (price: $${price}, cost: $${cost}, sku: ${sku})`)
+
+                // Set inventory quantity based on Item Status
+                const inventoryItemId = createdProduct.variants?.nodes?.[0]?.inventoryItem?.id
+                if (inventoryItemId) {
+                    await setInventoryQuantity({ storeInfo, inventoryItemId, locationId, quantity: inventoryQty })
+                    console.log(`[${sku}] ✓ Inventory set to ${inventoryQty} (${itemStatus})`)
+                } else {
+                    console.warn(`[${sku}] No inventoryItemId — skipping inventory set`)
+                }
             }
 
             // Record listing event
