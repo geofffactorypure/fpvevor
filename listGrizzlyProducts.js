@@ -245,7 +245,6 @@ async function scrapeProductData(sku) {
 
     // Manuals — construct predictable CDN URLs based on Resources flags
     const manuals = []
-    const skuLower = sku.toLowerCase()
     const resources = product.Resources || {}
     if (resources.HasManual) {
         manuals.push(`Manual:https://cdn0.grizzly.com/manuals/${skuLower}_m.pdf`)
