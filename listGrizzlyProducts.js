@@ -21,6 +21,8 @@ const STORE_ID = 1
 const BRAND_FILTER = process.argv[2]?.trim() || null
 const LIMIT = parseInt(process.argv[3]) || 10
 const CONCURRENCY = parseInt(process.argv[4]) || 3
+const RETRY_MODE = process.argv.includes('--retry')
+const RETRY_FILE = new URL('./grizzly_lister_retry.json', import.meta.url)
 const SHOPIFY_API_VERSION = '2026-01'
 
 const GRIZZLY_UA =
@@ -189,22 +191,64 @@ function parseCopyHtml(copyHtml) {
  *
  * Product data is extracted from the embedded window.product JSON object.
  */
-async function fetchProductJson(url) {
-    const pageRes = await fetch(url, {
-        headers: { 'User-Agent': GRIZZLY_UA },
-        signal: AbortSignal.timeout(20000),
-        redirect: 'follow',
-    })
-    if (!pageRes.ok) return null
-    const pageHtml = await pageRes.text()
-    const canonicalUrl = pageRes.url
-    const productMatch = pageHtml.match(/window\.product=(\{[\s\S]*?\});(?:window\.|<\/script>)/)
-    if (!productMatch) return null
-    try {
-        return { product: JSON.parse(productMatch[1]), canonicalUrl }
-    } catch {
-        return null
+async function fetchProductJson(url, retries = 5) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        let pageRes
+        try {
+            pageRes = await fetch(url, {
+                headers: { 'User-Agent': GRIZZLY_UA },
+                signal: AbortSignal.timeout(20000),
+                redirect: 'follow',
+            })
+        } catch (err) {
+            if (attempt < retries) {
+                const wait = attempt * 3000
+                console.warn(
+                    `[fetch] Network error for ${url} (attempt ${attempt}/${retries}), retrying in ${wait / 1000}s: ${err.message}`
+                )
+                await new Promise((r) => setTimeout(r, wait))
+                continue
+            }
+            return null
+        }
+
+        if (pageRes.status === 429 || pageRes.status === 503) {
+            const retryAfter = parseInt(pageRes.headers.get('retry-after') || '0', 10)
+            const wait = retryAfter > 0 ? retryAfter * 1000 : attempt * 5000
+            console.warn(
+                `[fetch] Rate limited (${pageRes.status}) for ${url} (attempt ${attempt}/${retries}), waiting ${wait / 1000}s...`
+            )
+            await new Promise((r) => setTimeout(r, wait))
+            continue
+        }
+
+        if (!pageRes.ok) return null
+
+        const pageHtml = await pageRes.text()
+        const canonicalUrl = pageRes.url
+
+        // Grizzly sometimes silently rate-limits with a 200 bot-check page that
+        // has no window.product JSON. Retry with increasing back-off.
+        const productMatch = pageHtml.match(/window\.product=(\{[\s\S]*?\});(?:window\.|<\/script>)/)
+        if (!productMatch) {
+            if (attempt < retries) {
+                const wait = attempt * 6000
+                console.warn(
+                    `[fetch] Got 200 but no window.product for ${url} (attempt ${attempt}/${retries}), waiting ${wait / 1000}s...`
+                )
+                await new Promise((r) => setTimeout(r, wait))
+                continue
+            }
+            return null
+        }
+
+        try {
+            return { product: JSON.parse(productMatch[1]), canonicalUrl }
+        } catch {
+            return null
+        }
     }
+    return null
 }
 
 async function scrapeProductData(sku) {
@@ -607,7 +651,15 @@ function sanitizeSingleLine(val) {
     return val.replace(/[\r\n\t]+/g, ' ').trim()
 }
 
-async function createShopifyProduct({ scrapedResult, product_type, vendor, sku, storeInfo, pool }) {
+async function createShopifyProduct({
+    scrapedResult,
+    product_type,
+    vendor,
+    sku,
+    storeInfo,
+    pool,
+    priceRaised = false,
+}) {
     const media =
         scrapedResult.Media?.map((m) => ({
             alt: m.alt,
@@ -700,7 +752,7 @@ async function createShopifyProduct({ scrapedResult, product_type, vendor, sku, 
         vendor,
         status: !media.length ? 'DRAFT' : 'ACTIVE',
         seo: { description: scrapedResult.MetaDescription },
-        tags: ['new', 'Grizzly Lister', ...tags.filter(Boolean)],
+        tags: ['new', 'Grizzly Lister', ...(priceRaised ? ['grizzly_special_pricing'] : []), ...tags.filter(Boolean)],
         metafields: [
             {
                 namespace: 'custom',
@@ -968,9 +1020,9 @@ async function main() {
     }
 
     try {
-        // 1. Load griz_price_list.csv (row 1 is metadata; row 2 is headers)
-        console.log('Loading griz_price_list.csv...')
-        const csvPath = new URL('./griz_price_list.csv', import.meta.url)
+        // 1. Load grizzly_price_list_latest.csv (row 1 is metadata; row 2 is headers)
+        console.log('Loading grizzly_price_list_latest.csv...')
+        const csvPath = new URL('./grizzly_price_list_latest.csv', import.meta.url)
         const csvContent = fs.readFileSync(csvPath, 'utf-8')
         const csvRows = parse(csvContent, {
             columns: true,
@@ -1002,8 +1054,28 @@ async function main() {
             )
         }
 
-        // 3. Filter and transform CSV rows
+        // 3. Load grizzly_unlisted_cross_sells.csv — SKUs in this set get price-raising
+        //    instead of being skipped when their natural margin is below the floor.
+        const crossSellsCsvPath = new URL('./grizzly_unlisted_cross_sells.csv', import.meta.url)
+        const crossSellSkuSet = new Set()
+        if (fs.existsSync(crossSellsCsvPath)) {
+            const csRows = parse(fs.readFileSync(crossSellsCsvPath, 'utf-8'), {
+                columns: true,
+                skip_empty_lines: true,
+                relax_column_count: true,
+                relax_quotes: true,
+                bom: true,
+            })
+            for (const r of csRows) {
+                const s = r['accessory_sku']?.trim()
+                if (s && (r['listed'] || '').toLowerCase() !== 'yes') crossSellSkuSet.add(s.toUpperCase())
+            }
+            console.log(`Loaded ${crossSellSkuSet.size} unlisted cross-sell SKUs from grizzly_unlisted_cross_sells.csv`)
+        }
+
+        // 4. Filter and transform CSV rows
         const MIN_MARGIN = 0.07
+        const TARGET_CROSS_SELL_MARGIN = 0.1
         const allRows = csvRows
             .map((row) => {
                 const sku = row['Item Number']?.trim()
@@ -1038,8 +1110,20 @@ async function main() {
                     price = msrpFallback
                 }
 
-                const margin =
-                    price > 0 ? Math.round(((price - dealerPrice - shippingCost) / price) * 10000) / 10000 : 0
+                let margin = price > 0 ? Math.round(((price - dealerPrice - shippingCost) / price) * 10000) / 10000 : 0
+
+                // Cross-sell rescue: if this SKU is in the unlisted cross-sells list and the
+                // natural price can't clear a 10% margin, raise the list price until it does.
+                const isCrossSell = crossSellSkuSet.has(sku?.toUpperCase() || '')
+                let priceRaised = false
+                if (isCrossSell && margin < TARGET_CROSS_SELL_MARGIN) {
+                    const minPriceForTarget = Math.ceil((dealerPrice + shippingCost) / (1 - TARGET_CROSS_SELL_MARGIN))
+                    if (minPriceForTarget > price) {
+                        price = minPriceForTarget
+                        priceRaised = true
+                        margin = Math.round(((price - dealerPrice - shippingCost) / price) * 10000) / 10000
+                    }
+                }
 
                 // Product type from mapping CSV; fall back to empty (no type)
                 const productType = skuTypeMap.get(sku) || ''
@@ -1060,6 +1144,8 @@ async function main() {
                     discontinued: row['Discontinued']?.trim().toLowerCase() === 'true',
                     itemStatus: row['Item Status']?.trim(),
                     margin,
+                    isCrossSell,
+                    priceRaised,
                 }
             })
             .filter((row) => {
@@ -1071,7 +1157,9 @@ async function main() {
                 if (row.discontinued) return false
                 // Apply brand filter if specified
                 if (BRAND_FILTER && row.vendor !== BRAND_FILTER) return false
-                // Hard 7% margin floor — skip anything that can't clear it
+                // Hard 7% margin floor — skip anything that can't clear it.
+                // Cross-sell SKUs are exempt: their price was already raised to 10% in the
+                // mapping step, so they will naturally pass this check.
                 if (row.margin < MIN_MARGIN) {
                     console.warn(`[${row.sku}] Skipping — margin ${(row.margin * 100).toFixed(1)}% is below 7% floor`)
                     return false
@@ -1109,8 +1197,9 @@ async function main() {
         // 6. Filter out already-listed SKUs and those with no product type when mapping exists
         const toProcess = allRows.filter((row) => {
             if (listedSkuSet.has(row.sku)) return false
-            // If the mapping file exists but has no type for this SKU, skip
-            if (skuTypeMap.size > 0 && !row.productType) {
+            // If the mapping file exists but has no type for this SKU, skip —
+            // unless it's a cross-sell (accessories often lack a type mapping).
+            if (skuTypeMap.size > 0 && !row.productType && !row.isCrossSell) {
                 console.warn(`[${row.sku}] No product type mapping found — skipping`)
                 return false
             }
@@ -1161,11 +1250,29 @@ async function main() {
         const locationId = DEFAULT_LOCATION_INVENTORY_ID
 
         // 9. List products
-        const toList = toProcess.slice(0, LIMIT)
+        // In --retry mode, restrict to the SKUs saved from the previous failed run
+        let filteredToProcess = toProcess
+        if (RETRY_MODE) {
+            let retrySkus = []
+            try {
+                retrySkus = JSON.parse(fs.readFileSync(RETRY_FILE, 'utf-8'))
+            } catch {
+                console.log('No retry file found. Nothing to retry.')
+                return
+            }
+            const retrySet = new Set(retrySkus.map((s) => s.toUpperCase()))
+            filteredToProcess = toProcess.filter((r) => retrySet.has(r.sku.toUpperCase()))
+            console.log(
+                `Retrying ${filteredToProcess.length} previously failed SKU(s) from ${retrySkus.length} in retry file\n`
+            )
+        }
+
+        const toList = filteredToProcess.slice(0, LIMIT)
         console.log(`\nListing ${toList.length} product(s) with concurrency ${CONCURRENCY}...\n`)
 
         let successCount = 0
         let failCount = 0
+        const failedSkus = []
 
         async function listOneProduct(row) {
             const {
@@ -1180,10 +1287,11 @@ async function main() {
                 productType,
                 upc: csvUpc,
                 itemStatus,
+                priceRaised,
             } = row
             const inventoryQty = (itemStatus || '').toLowerCase() === 'available' ? 100 : 0
 
-            console.log(`[${sku}] Starting... (vendor: ${vendor})`)
+            console.log(`[${sku}] Starting... (vendor: ${vendor}${priceRaised ? ', SPECIAL PRICING' : ''})`)
 
             // Scrape product data from grizzly.com
             const scrapedResult = await scrapeProductData(sku)
@@ -1248,6 +1356,7 @@ async function main() {
                 sku,
                 storeInfo,
                 pool,
+                priceRaised,
             })
 
             if (createResponse.data?.productCreate?.userErrors?.length > 0) {
@@ -1474,13 +1583,29 @@ async function main() {
             console.log(`\n── Batch ${batchNum}/${totalBatches} (${batch.length} products) ──\n`)
 
             const results = await Promise.allSettled(batch.map((row) => listOneProduct(row)))
-            for (const r of results) {
+            for (let j = 0; j < results.length; j++) {
+                const r = results[j]
                 if (r.status === 'fulfilled') successCount++
                 else {
                     failCount++
                     console.error('Product failed:', r.reason?.message || r.reason)
+                    failedSkus.push(batch[j].sku)
                 }
             }
+        }
+
+        if (failedSkus.length > 0) {
+            fs.writeFileSync(RETRY_FILE, JSON.stringify(failedSkus, null, 2))
+            console.log(
+                `\n  Saved ${failedSkus.length} failed SKU(s) to grizzly_lister_retry.json — run with --retry to retry them`
+            )
+        } else if (RETRY_MODE) {
+            try {
+                fs.unlinkSync(RETRY_FILE)
+            } catch {
+                /* already gone */
+            }
+            console.log(`\n  All retried SKUs succeeded — retry file cleared`)
         }
 
         console.log(`\n✓ Done! ${successCount} succeeded, ${failCount} failed.`)
