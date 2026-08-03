@@ -1150,6 +1150,8 @@ async function main() {
             })
             .filter((row) => {
                 if (!row.sku) return false
+                // Skip part SKUs — parts pages have no description
+                if (row.sku.toUpperCase().startsWith('P')) return false
                 // Whitelist — only list brands we carry
                 const ALLOWED_VENDORS = new Set(['Grizzly', 'Shop Fox', 'South Bend'])
                 if (!ALLOWED_VENDORS.has(row.vendor)) return false
