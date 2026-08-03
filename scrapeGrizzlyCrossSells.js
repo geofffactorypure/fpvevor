@@ -28,6 +28,7 @@ import { SESClient, SendRawEmailCommand } from '@aws-sdk/client-ses'
  *   node scrapeGrizzlyCrossSells.js
  *   node scrapeGrizzlyCrossSells.js "Shop Fox" --limit=50
  *   node scrapeGrizzlyCrossSells.js --dry-run
+ *   node scrapeGrizzlyCrossSells.js --retry       (re-run only SKUs that failed last time)
  */
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -39,13 +40,13 @@ const GRIZZLY_BASE = 'https://www.grizzly.com'
 const BRAND_FILTER =
     process.argv.find((a) => !a.startsWith('--') && a !== process.argv[0] && a !== process.argv[1]) || null
 const DRY_RUN = process.argv.includes('--dry-run')
+const RETRY_MODE = process.argv.includes('--retry')
 const LIMIT = parseInt((process.argv.find((a) => a.startsWith('--limit=')) || '').split('=')[1]) || Infinity
-const START_AFTER = (process.argv.find((a) => a.startsWith('--after=')) || '').split('=')[1] || null
 const SCRAPE_DELAY_MS = 1500
 const CONCURRENCY = 3
 
 const CSV_OUT = new URL('./grizzly_accessories.csv', import.meta.url)
-const PROGRESS_FILE = new URL('./grizzly_cross_sells_progress.txt', import.meta.url)
+const RETRY_FILE = new URL('./grizzly_cross_sells_retry.json', import.meta.url)
 
 const TO = 'gjarman@factorypure.com'
 const FROM = 'gjarman@factorypure.com'
@@ -133,6 +134,27 @@ async function fetchGrizzlyPage(url, retries = 5) {
             await new Promise((r) => setTimeout(r, wait))
             continue
         }
+        if (!res.ok) return res
+
+        // Read the body and check for window.product — Grizzly sometimes silently
+        // returns a 200 bot-check/empty page with no product JSON when rate limiting
+        const html = await res.text()
+        if (!html.includes('window.product=')) {
+            if (attempt < retries) {
+                const wait = attempt * 6000
+                console.warn(
+                    `  [fetch] Got 200 but no window.product for ${url} (attempt ${attempt}/${retries}), waiting ${wait / 1000}s...`
+                )
+                await new Promise((r) => setTimeout(r, wait))
+                continue
+            }
+            // Attach the html so callers can inspect it without re-fetching
+            res._html = html
+            res._blocked = true
+            return res
+        }
+
+        res._html = html
         return res
     }
     throw new Error(`Exhausted retries for ${url}`)
@@ -141,11 +163,14 @@ async function fetchGrizzlyPage(url, retries = 5) {
 /**
  * Returns array of { sku, name } from window.product.Accessories for the given product SKU.
  */
+// Returns array of { sku, name }, or null if the page was silently blocked
 async function scrapeAccessories(sku) {
     const url = `${GRIZZLY_BASE}/products/x/${sku.toLowerCase()}`
     const res = await fetchGrizzlyPage(url)
-    if (!res.ok) return []
-    const html = await res.text()
+    if (!res.ok) return null
+    // fetchGrizzlyPage pre-reads and caches html on res._html (after verifying window.product exists)
+    const html = res._html
+    if (!html || res._blocked) return null
     const m = html.match(/window\.product=(\{[\s\S]*?\});(?:window\.|<\/script>)/)
     if (!m) return []
     let product
@@ -155,8 +180,12 @@ async function scrapeAccessories(sku) {
         return []
     }
     // Merge Accessories + KitComponents — both represent items shown alongside the product
-    const accessories = (product.Accessories || []).filter((a) => a.Sku).map((a) => ({ sku: a.Sku.trim(), name: a.Name || '' }))
-    const kitComponents = (product.KitComponents || []).filter((a) => a.Sku).map((a) => ({ sku: a.Sku.trim(), name: a.Name || a.Sku || '' }))
+    const accessories = (product.Accessories || [])
+        .filter((a) => a.Sku)
+        .map((a) => ({ sku: a.Sku.trim(), name: a.Name || '' }))
+    const kitComponents = (product.KitComponents || [])
+        .filter((a) => a.Sku)
+        .map((a) => ({ sku: a.Sku.trim(), name: a.Name || a.Sku || '' }))
     const combined = [...accessories]
     for (const item of kitComponents) {
         if (!combined.some((a) => a.sku.toUpperCase() === item.sku.toUpperCase())) combined.push(item)
@@ -227,17 +256,20 @@ async function main() {
         if (!storeInfo) throw new Error(`Store ${STORE_ID} not found`)
 
         // 2. Fetch all listed Grizzly-family products from DB
-        const vendors = BRAND_FILTER ? [BRAND_FILTER] : VENDORS
-        const vPlaceholders = vendors.map(() => '?').join(', ')
+        // Use LIKE to catch vendor variants: 'Grizzly', 'Grizzly PRO', 'Grizzly Precision', etc.
+        const vendorConditions = BRAND_FILTER
+            ? `p.vendor = ?`
+            : `(p.vendor LIKE 'Grizzly%' OR p.vendor = 'Shop Fox' OR p.vendor = 'South Bend')`
+        const vendorArgs = BRAND_FILTER ? [BRAND_FILTER] : []
 
         const products = await query(
             pool,
             `SELECT p.id, p.title, p.product_type, p.admin_graphql_api_id, vn.sku
              FROM products p
              JOIN variants_new vn ON vn.product_id = p.id
-             WHERE p.vendor IN (${vPlaceholders}) AND p.store_id = ? AND vn.sku IS NOT NULL
+             WHERE ${vendorConditions} AND p.store_id = ? AND vn.sku IS NOT NULL
              ORDER BY p.id`,
-            [...vendors, STORE_ID]
+            [...vendorArgs, STORE_ID]
         )
         console.log(`Found ${products.length} listed product(s)`)
         if (products.length === 0) {
@@ -261,22 +293,19 @@ async function main() {
         }
         console.log(`Built SKU→GID map for ${skuToGid.size} listed product(s)\n`)
 
-        // 4. Resume support
-        let startAfterSku = START_AFTER
-        if (!startAfterSku) {
-            try {
-                startAfterSku = fs.readFileSync(PROGRESS_FILE, 'utf-8').trim()
-            } catch {
-                /* none */
-            }
-        }
+        // 4. Determine which products to process
         let toProcess = products
-        if (startAfterSku) {
-            const idx = toProcess.findIndex((p) => p.sku === startAfterSku)
-            if (idx !== -1) {
-                toProcess = toProcess.slice(idx + 1)
-                console.log(`Resuming after SKU ${startAfterSku} (skipping ${idx + 1})\n`)
+        if (RETRY_MODE) {
+            let retrySkus = []
+            try {
+                retrySkus = JSON.parse(fs.readFileSync(RETRY_FILE, 'utf-8'))
+            } catch {
+                console.log('No retry file found. Nothing to retry.')
+                return
             }
+            const retrySet = new Set(retrySkus.map((s) => s.toUpperCase()))
+            toProcess = products.filter((p) => retrySet.has(p.sku.toUpperCase()))
+            console.log(`Retrying ${toProcess.length} previously failed SKU(s) from ${retrySkus.length} in retry file\n`)
         }
         toProcess = toProcess.slice(0, LIMIT)
         console.log(`Scraping accessories for ${toProcess.length} product(s)...\n`)
@@ -285,6 +314,8 @@ async function main() {
         const accessoryMap = new Map()
         // cross-sell updates to apply after scraping
         const crossSellUpdates = []
+        // SKUs that failed (errors or silent blocks) — saved to retry file at end
+        const failedSkus = []
         let scrapeSuccess = 0,
             scrapeFail = 0
 
@@ -297,10 +328,16 @@ async function main() {
                     try {
                         const accessories = await scrapeAccessories(sku)
 
+                        if (accessories === null) {
+                            console.warn(`  [${sku}] ✗ Blocked or failed to load page — queued for retry`)
+                            failedSkus.push(sku)
+                            scrapeFail++
+                            return
+                        }
+
                         if (accessories.length === 0) {
                             console.log(`  [${sku}] No accessories`)
                             scrapeSuccess++
-                            fs.writeFileSync(PROGRESS_FILE, sku)
                             return
                         }
 
@@ -330,9 +367,9 @@ async function main() {
                         }
 
                         scrapeSuccess++
-                        fs.writeFileSync(PROGRESS_FILE, sku)
                     } catch (err) {
-                        console.error(`  [${sku}] ✗ ${err.message}`)
+                        console.error(`  [${sku}] ✗ ${err.message} — queued for retry`)
+                        failedSkus.push(sku)
                         scrapeFail++
                     }
                 })
@@ -362,6 +399,16 @@ async function main() {
         const listedRows = csvRows.filter((r) => r.listed)
         console.log(`\nSaved ${csvRows.length} accessory row(s) to grizzly_accessories.csv`)
         console.log(`  ${notListedRows.length} not yet listed  |  ${listedRows.length} already listed`)
+
+        // Save or clear retry file
+        if (failedSkus.length > 0) {
+            fs.writeFileSync(RETRY_FILE, JSON.stringify(failedSkus, null, 2))
+            console.log(`\n  Saved ${failedSkus.length} failed SKU(s) to grizzly_cross_sells_retry.json — run with --retry to retry them`)
+        } else if (RETRY_MODE) {
+            // All retries succeeded — clear the file
+            try { fs.unlinkSync(RETRY_FILE) } catch { /* already gone */ }
+            console.log(`\n  All retried SKUs succeeded — retry file cleared`)
+        }
 
         // 6. Set cross_sells metafield for products with listed accessories
         if (!DRY_RUN && crossSellUpdates.length > 0) {
