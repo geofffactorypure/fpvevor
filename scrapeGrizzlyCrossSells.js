@@ -294,7 +294,21 @@ async function main() {
         console.log(`Built SKU→GID map for ${skuToGid.size} listed product(s)\n`)
 
         // 4. Determine which products to process
-        let toProcess = products
+        // Exclude accessory/cross-sell SKUs (tagged grizzly_special_pricing) — they are
+        // accessories themselves and don't need their own cross-sells scraped.
+        const crossSellsPath = new URL('./grizzly_unlisted_cross_sells.csv', import.meta.url)
+        const crossSellSkuSet = new Set()
+        if (fs.existsSync(crossSellsPath)) {
+            const lines = fs.readFileSync(crossSellsPath, 'utf-8').split('\n')
+            // Header: accessory_sku,accessory_name,listed,found_on_skus,found_on_count
+            for (let i = 1; i < lines.length; i++) {
+                const sku = lines[i].split(',')[0]?.trim().replace(/^"|"$/g, '')
+                if (sku) crossSellSkuSet.add(sku.toUpperCase())
+            }
+            console.log(`Excluding ${crossSellSkuSet.size} cross-sell/accessory SKU(s) from scrape\n`)
+        }
+
+        let toProcess = products.filter((p) => !crossSellSkuSet.has(p.sku?.toUpperCase()))
         if (RETRY_MODE) {
             let retrySkus = []
             try {
@@ -305,7 +319,9 @@ async function main() {
             }
             const retrySet = new Set(retrySkus.map((s) => s.toUpperCase()))
             toProcess = products.filter((p) => retrySet.has(p.sku.toUpperCase()))
-            console.log(`Retrying ${toProcess.length} previously failed SKU(s) from ${retrySkus.length} in retry file\n`)
+            console.log(
+                `Retrying ${toProcess.length} previously failed SKU(s) from ${retrySkus.length} in retry file\n`
+            )
         }
         toProcess = toProcess.slice(0, LIMIT)
         console.log(`Scraping accessories for ${toProcess.length} product(s)...\n`)
@@ -403,10 +419,16 @@ async function main() {
         // Save or clear retry file
         if (failedSkus.length > 0) {
             fs.writeFileSync(RETRY_FILE, JSON.stringify(failedSkus, null, 2))
-            console.log(`\n  Saved ${failedSkus.length} failed SKU(s) to grizzly_cross_sells_retry.json — run with --retry to retry them`)
+            console.log(
+                `\n  Saved ${failedSkus.length} failed SKU(s) to grizzly_cross_sells_retry.json — run with --retry to retry them`
+            )
         } else if (RETRY_MODE) {
             // All retries succeeded — clear the file
-            try { fs.unlinkSync(RETRY_FILE) } catch { /* already gone */ }
+            try {
+                fs.unlinkSync(RETRY_FILE)
+            } catch {
+                /* already gone */
+            }
             console.log(`\n  All retried SKUs succeeded — retry file cleared`)
         }
 
