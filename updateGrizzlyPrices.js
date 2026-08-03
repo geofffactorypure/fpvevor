@@ -1,10 +1,11 @@
 /**
  * updateGrizzlyPrices.js
  *
- * Reads grizzly-price-update.xlsx and updates Shopify list price, variant cost,
+ * Reads grizzly_price_list_latest.csv and updates Shopify list price, variant cost,
  * and inventory quantity for all already-listed Grizzly / Shop Fox / South Bend products.
  *
  * Pricing logic mirrors listGrizzlyProducts.js exactly.
+ * List price = undercut of (MSRP + shipping cost) — the true delivered price from Grizzly.
  * Inventory: "Available" → 100 units, anything else → 0 units.
  *
  * Usage:
@@ -19,8 +20,9 @@ config({ path: './.env.local', override: true })
 
 import { fileURLToPath } from 'url'
 import path from 'path'
+import fs from 'fs'
 import fetch from 'node-fetch'
-import xlsx from 'xlsx'
+import { parse } from 'csv-parse/sync'
 import mysql from 'mysql'
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -37,16 +39,33 @@ const { DB_PASSWORD, DB_WRITE_HOST, DB_USER } = process.env
 // ── Pricing Logic (mirrors listGrizzlyProducts.js) ─────────────────────────
 const MIN_MARGIN = 0.1
 
+// Shipping chart lookup for "See Chart" rows
+function lookupShippingCost(dealerPrice) {
+    if (dealerPrice >= 150) return 0
+    if (dealerPrice >= 100) return 21.99
+    if (dealerPrice >= 50) return 18.99
+    if (dealerPrice >= 15) return 16.99
+    return 8.99
+}
+
 function calcPrice({ msrp, dealerPrice, shippingCost, dealerMap }) {
-    const maxDiscount = Math.min(msrp * 0.05, 10)
-    const discounted = Math.round(msrp - maxDiscount)
+    // effectiveMsrp = what a customer pays at Grizzly (list price + shipping)
+    const effectiveMsrp = msrp + shippingCost
+    const maxDiscount = Math.min(effectiveMsrp * 0.05, 10)
+    const discounted = Math.round(effectiveMsrp - maxDiscount)
     const discountedMargin = discounted > 0 ? (discounted - dealerPrice - shippingCost) / discounted : 0
-    const msrpFallback = discountedMargin >= 0.15 ? discounted : Math.round(msrp)
+    const msrpFallback = discountedMargin >= 0.15 ? discounted : Math.round(effectiveMsrp)
 
     let price
     if (dealerMap > 0) {
-        const mapMargin = (dealerMap - dealerPrice - shippingCost) / dealerMap
-        price = mapMargin >= MIN_MARGIN ? dealerMap : msrpFallback
+        // effectiveMap = what a customer pays at Grizzly when buying at MAP (map + shipping)
+        const effectiveMap = dealerMap + shippingCost
+        const mapMaxDiscount = Math.min(effectiveMap * 0.05, 10)
+        const discountedMap = Math.round(effectiveMap - mapMaxDiscount)
+        const discountedMapMargin = discountedMap > 0 ? (discountedMap - dealerPrice - shippingCost) / discountedMap : 0
+        const mapFallback = discountedMapMargin >= 0.15 ? discountedMap : Math.round(effectiveMap)
+        const mapMargin = mapFallback > 0 ? (mapFallback - dealerPrice - shippingCost) / mapFallback : 0
+        price = mapMargin >= MIN_MARGIN ? mapFallback : msrpFallback
     } else {
         price = msrpFallback
     }
@@ -162,10 +181,7 @@ async function fetchListedVariants(storeInfo) {
 
 // Get the primary Shopify location ID
 async function getPrimaryLocationId(storeInfo) {
-    const data = await shopifyGraphQL(
-        storeInfo,
-        `query { locations(first: 1) { edges { node { id name } } } }`
-    )
+    const data = await shopifyGraphQL(storeInfo, `query { locations(first: 1) { edges { node { id name } } } }`)
     const location = data.locations.edges[0]?.node
     if (!location) throw new Error('No location found in Shopify store')
     console.log(`Using location: ${location.name} (${location.id})`)
@@ -235,42 +251,50 @@ async function main() {
     const pool = createPool()
 
     try {
-        // 1. Load XLSX
+        // 1. Load grizzly_price_list_latest.csv (row 1 is metadata; row 2 is headers)
         const __dirname = path.dirname(fileURLToPath(import.meta.url))
-        const xlsxPath = path.join(__dirname, 'grizzly-price-update.xlsx')
-        console.log('Loading grizzly-price-update.xlsx...')
-        const workbook = xlsx.readFile(xlsxPath)
-        const ws = workbook.Sheets['Price List']
-        if (!ws) throw new Error('Sheet "Price List" not found in grizzly-price-update.xlsx')
-
-        // Row 0 is a "Pricing effective..." notice; row 1 is the actual column header row
-        const rows = xlsx.utils.sheet_to_json(ws, { range: 1, defval: null })
-        console.log(`Loaded ${rows.length} rows from "Price List" sheet`)
+        const csvPath = path.join(__dirname, 'grizzly_price_list_latest.csv')
+        console.log('Loading grizzly_price_list_latest.csv...')
+        const csvContent = fs.readFileSync(csvPath, 'utf-8')
+        const rows = parse(csvContent, {
+            columns: true,
+            skip_empty_lines: true,
+            relax_column_count: true,
+            relax_quotes: true,
+            bom: true,
+            from_line: 2,
+        })
+        console.log(`Loaded ${rows.length} rows from grizzly_price_list_latest.csv`)
 
         // 2. Parse rows and compute prices using same logic as listGrizzlyProducts.js
         const priceMap = new Map() // sku → pricing data
 
         for (const row of rows) {
-            const sku = row['Item Number']?.toString().trim()
+            const sku = row['Item Number']?.trim()
             if (!sku) continue
 
-            const csvBrand = row['Brand']?.toString().trim() || ''
+            const csvBrand = row['Brand']?.trim() || ''
             const vendor = normalizeBrand(csvBrand)
 
             if (BRAND_FILTER && vendor !== BRAND_FILTER) continue
 
-            // Numeric columns come through as numbers from xlsx; strings like "See Chart" default to 0
-            const toNum = (val) =>
-                typeof val === 'number' ? val : parseFloat((val || '').toString().replace(/[^0-9.]/g, '')) || 0
+            const toNum = (val) => parseFloat((val || '').replace(/[^0-9.]/g, '')) || 0
 
             const msrp = toNum(row['MSRP'])
             const dealerPrice = toNum(row['Dealer Price'])
-            const shippingCost = toNum(row['Dealer Shipping Cost'])
+            const rawShipping = (row['Dealer Shipping Cost'] || '').trim()
+            const shippingCost =
+                rawShipping.toLowerCase() === 'see chart'
+                    ? lookupShippingCost(dealerPrice)
+                    : toNum(rawShipping)
             const dealerMap = toNum(row['Dealer MAP'])
 
             if (!msrp || !dealerPrice) continue
 
-            const itemStatus = row['Item Status']?.toString().trim() || ''
+            const discontinued = row['Discontinued']?.trim().toLowerCase() === 'true'
+            if (discontinued) continue
+
+            const itemStatus = row['Item Status']?.trim() || ''
             const quantity = itemStatus.toLowerCase() === 'available' ? 100 : 0
 
             const { price, margin } = calcPrice({ msrp, dealerPrice, shippingCost, dealerMap })
@@ -292,7 +316,7 @@ async function main() {
             })
         }
 
-        console.log(`Parsed ${priceMap.size} SKUs with valid pricing from XLSX`)
+        console.log(`Parsed ${priceMap.size} SKUs with valid pricing from CSV`)
 
         // 3. Get store info
         const [storeInfo] = await query(pool, `SELECT * FROM stores WHERE id = ?`, [STORE_ID])
@@ -316,9 +340,7 @@ async function main() {
             toUpdate.push({ sku, ...priceData, ...shopifyData })
         }
 
-        console.log(
-            `${toUpdate.length} SKU(s) matched to listed products (${notListedCount} in XLSX not yet listed)`
-        )
+        console.log(`${toUpdate.length} SKU(s) matched to listed products (${notListedCount} in XLSX not yet listed)`)
 
         if (toUpdate.length === 0) {
             console.log('Nothing to update. Exiting.')
