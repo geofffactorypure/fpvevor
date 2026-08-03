@@ -116,7 +116,9 @@ async function fetchGrizzlyPage(url, retries = 5) {
         } catch (err) {
             if (attempt < retries) {
                 const wait = attempt * 3000
-                console.warn(`  [fetch] Network error (attempt ${attempt}/${retries}), retrying in ${wait / 1000}s: ${err.message}`)
+                console.warn(
+                    `  [fetch] Network error (attempt ${attempt}/${retries}), retrying in ${wait / 1000}s: ${err.message}`
+                )
                 await new Promise((r) => setTimeout(r, wait))
                 continue
             }
@@ -125,7 +127,9 @@ async function fetchGrizzlyPage(url, retries = 5) {
         if (res.status === 429 || res.status === 503) {
             const retryAfter = parseInt(res.headers.get('retry-after') || '0', 10)
             const wait = retryAfter > 0 ? retryAfter * 1000 : attempt * 5000
-            console.warn(`  [fetch] Rate limited (${res.status}) (attempt ${attempt}/${retries}), waiting ${wait / 1000}s...`)
+            console.warn(
+                `  [fetch] Rate limited (${res.status}) (attempt ${attempt}/${retries}), waiting ${wait / 1000}s...`
+            )
             await new Promise((r) => setTimeout(r, wait))
             continue
         }
@@ -145,11 +149,19 @@ async function scrapeAccessories(sku) {
     const m = html.match(/window\.product=(\{[\s\S]*?\});(?:window\.|<\/script>)/)
     if (!m) return []
     let product
-    try { product = JSON.parse(m[1]) } catch { return [] }
-    if (!Array.isArray(product.Accessories) || product.Accessories.length === 0) return []
-    return product.Accessories
-        .filter((a) => a.Sku)
-        .map((a) => ({ sku: a.Sku.trim(), name: a.Name || '' }))
+    try {
+        product = JSON.parse(m[1])
+    } catch {
+        return []
+    }
+    // Merge Accessories + KitComponents — both represent items shown alongside the product
+    const accessories = (product.Accessories || []).filter((a) => a.Sku).map((a) => ({ sku: a.Sku.trim(), name: a.Name || '' }))
+    const kitComponents = (product.KitComponents || []).filter((a) => a.Sku).map((a) => ({ sku: a.Sku.trim(), name: a.Name || a.Sku || '' }))
+    const combined = [...accessories]
+    for (const item of kitComponents) {
+        if (!combined.some((a) => a.sku.toUpperCase() === item.sku.toUpperCase())) combined.push(item)
+    }
+    return combined
 }
 
 // ── CSV / Email ───────────────────────────────────────────────────────────────
@@ -228,17 +240,20 @@ async function main() {
             [...vendors, STORE_ID]
         )
         console.log(`Found ${products.length} listed product(s)`)
-        if (products.length === 0) { console.log('Nothing to process. Exiting.'); return }
+        if (products.length === 0) {
+            console.log('Nothing to process. Exiting.')
+            return
+        }
 
-        // 3. Build SKU → GID lookup across ALL Grizzly-family products
-        const allVPlaceholders = VENDORS.map(() => '?').join(', ')
+        // 3. Build SKU → GID lookup across ALL products in the store (any vendor)
+        //    so we correctly detect listed status even for variant vendor names like 'Grizzly PRO'
         const allRows = await query(
             pool,
             `SELECT p.id, p.admin_graphql_api_id, vn.sku
              FROM products p
              JOIN variants_new vn ON vn.product_id = p.id
-             WHERE p.vendor IN (${allVPlaceholders}) AND p.store_id = ? AND vn.sku IS NOT NULL`,
-            [...VENDORS, STORE_ID]
+             WHERE p.store_id = ? AND vn.sku IS NOT NULL`,
+            [STORE_ID]
         )
         const skuToGid = new Map()
         for (const r of allRows) {
@@ -249,7 +264,11 @@ async function main() {
         // 4. Resume support
         let startAfterSku = START_AFTER
         if (!startAfterSku) {
-            try { startAfterSku = fs.readFileSync(PROGRESS_FILE, 'utf-8').trim() } catch { /* none */ }
+            try {
+                startAfterSku = fs.readFileSync(PROGRESS_FILE, 'utf-8').trim()
+            } catch {
+                /* none */
+            }
         }
         let toProcess = products
         if (startAfterSku) {
@@ -266,7 +285,8 @@ async function main() {
         const accessoryMap = new Map()
         // cross-sell updates to apply after scraping
         const crossSellUpdates = []
-        let scrapeSuccess = 0, scrapeFail = 0
+        let scrapeSuccess = 0,
+            scrapeFail = 0
 
         for (let i = 0; i < toProcess.length; i += CONCURRENCY) {
             const batch = toProcess.slice(i, i + CONCURRENCY)
@@ -293,11 +313,7 @@ async function main() {
                         }
 
                         const listedGids = [
-                            ...new Set(
-                                accessories
-                                    .map((a) => skuToGid.get(a.sku.toUpperCase()))
-                                    .filter(Boolean)
-                            ),
+                            ...new Set(accessories.map((a) => skuToGid.get(a.sku.toUpperCase())).filter(Boolean)),
                         ]
 
                         console.log(
@@ -350,7 +366,8 @@ async function main() {
         // 6. Set cross_sells metafield for products with listed accessories
         if (!DRY_RUN && crossSellUpdates.length > 0) {
             console.log(`\nUpdating cross_sells metafield for ${crossSellUpdates.length} product(s)...`)
-            let metaSuccess = 0, metaFail = 0
+            let metaSuccess = 0,
+                metaFail = 0
             for (const update of crossSellUpdates) {
                 try {
                     const result = await shopifyGraphQL(
@@ -362,13 +379,15 @@ async function main() {
                             }
                         }`,
                         {
-                            metafields: [{
-                                ownerId: update.productGid,
-                                namespace: 'custom',
-                                key: 'cross_sells',
-                                type: 'list.product_reference',
-                                value: JSON.stringify(update.gids),
-                            }],
+                            metafields: [
+                                {
+                                    ownerId: update.productGid,
+                                    namespace: 'custom',
+                                    key: 'cross_sells',
+                                    type: 'list.product_reference',
+                                    value: JSON.stringify(update.gids),
+                                },
+                            ],
                         }
                     )
                     const errors = result.data?.metafieldsSet?.userErrors
