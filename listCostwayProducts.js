@@ -1739,7 +1739,7 @@ async function main() {
         // 7. Load feed and process via search API
         await downloadFeedIfNeeded()
         const feedCsv = fs.readFileSync(FEED_CACHE_PATH, 'utf-8')
-        const feedRows = parse(feedCsv, { columns: true, skip_empty_lines: true, relax_column_count: true })
+        const feedRows = parse(feedCsv, { columns: true, skip_empty_lines: true, relax_column_count: true, quote: false })
 
         const itemNoSet = new Set()
         for (const row of feedRows) {
