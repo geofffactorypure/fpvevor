@@ -122,7 +122,7 @@ async function shopifyGraphQL(storeInfo, queryStr, variables = {}) {
 }
 
 // Paginate all Grizzly/Shop Fox/South Bend variants from Shopify
-// Returns Map<sku, { variantGid, productGid, inventoryItemId, currentPrice }>
+// Returns Map<sku, { variantGid, productGid, inventoryItemId, currentPrice, hasSpecialPricing }>
 async function fetchListedVariants(storeInfo) {
     const variantMap = new Map()
     const vendors = BRAND_FILTER ? [BRAND_FILTER] : ['Grizzly', 'Shop Fox', 'South Bend']
@@ -141,6 +141,7 @@ async function fetchListedVariants(storeInfo) {
                             cursor
                             node {
                                 id
+                                tags
                                 variants(first: 10) {
                                     nodes {
                                         id
@@ -158,6 +159,7 @@ async function fetchListedVariants(storeInfo) {
 
             const edges = data.products.edges
             for (const edge of edges) {
+                const hasSpecialPricing = (edge.node.tags || []).includes('grizzly_special_pricing')
                 for (const v of edge.node.variants.nodes) {
                     const sku = (v.sku || '').trim()
                     if (!sku) continue
@@ -166,6 +168,7 @@ async function fetchListedVariants(storeInfo) {
                         productGid: edge.node.id,
                         inventoryItemId: v.inventoryItem?.id || null,
                         currentPrice: parseFloat(v.price),
+                        hasSpecialPricing,
                     })
                 }
             }
@@ -298,7 +301,9 @@ async function main() {
             const { price, margin } = calcPrice({ msrp, dealerPrice, shippingCost, dealerMap })
 
             if (margin < MIN_MARGIN) {
-                console.warn(`[${sku}] Warning — margin ${(margin * 100).toFixed(1)}% is below 10% floor (updating anyway)`)
+                console.warn(
+                    `[${sku}] Warning — margin ${(margin * 100).toFixed(1)}% is below 10% floor (updating anyway)`
+                )
             }
 
             priceMap.set(sku, {
@@ -334,7 +339,15 @@ async function main() {
                 notListedCount++
                 continue
             }
-            toUpdate.push({ sku, ...priceData, ...shopifyData })
+            let { price, cost, shippingFee } = priceData
+            if (shopifyData.hasSpecialPricing) {
+                const minPrice = Math.ceil((cost + shippingFee) / (1 - MIN_MARGIN))
+                if (price < minPrice) {
+                    console.log(`[${sku}] grizzly_special_pricing: raising $${price} → $${minPrice} to hit ${(MIN_MARGIN * 100).toFixed(0)}% margin`)
+                    price = minPrice
+                }
+            }
+            toUpdate.push({ sku, ...priceData, price, ...shopifyData })
         }
 
         console.log(`${toUpdate.length} SKU(s) matched to listed products (${notListedCount} in XLSX not yet listed)`)
