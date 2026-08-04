@@ -30,6 +30,8 @@ const MAX_RETRIES = 5
 const DELAY_MS = 400
 
 const FEED_URL = 'https://www.costway.com/media/feed/US-Dropship-Shopify.csv'
+const FEED_CACHE_PATH = './costway_data/feed_cache.csv'
+const MIN_FEED_BYTES = 50 * 1024 * 1024
 const SEARCH_DELAY_MS = 400
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_AI_LISTER_API_KEY })
@@ -1124,13 +1126,19 @@ async function generateFiltersForNewProduct({ pool, productId, productType, prod
 // ── Feed / Search API ───────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-async function fetchFeed() {
+async function downloadFeedIfNeeded() {
+    if (fs.existsSync(FEED_CACHE_PATH)) {
+        console.log(`Using cached feed at ${FEED_CACHE_PATH}`)
+        return
+    }
     console.log(`Downloading feed from ${FEED_URL}...`)
     const res = await fetch(FEED_URL, { headers: { 'User-Agent': 'Mozilla/5.0' } })
     if (!res.ok) throw new Error(`Feed download failed: ${res.status}`)
-    const text = await res.text()
-    console.log(`Feed downloaded (${Math.round(Buffer.byteLength(text) / 1024 / 1024)} MB)`)
-    return text
+    const buffer = Buffer.from(await res.arrayBuffer())
+    if (buffer.length < MIN_FEED_BYTES) throw new Error(`Feed too small (${buffer.length} bytes), aborting`)
+    fs.mkdirSync('./costway_data', { recursive: true })
+    fs.writeFileSync(FEED_CACHE_PATH, buffer)
+    console.log(`Feed cached (${Math.round(buffer.length / 1024 / 1024)} MB)`)
 }
 
 async function searchApiForProduct(itemNo, retries = 5) {
@@ -1728,8 +1736,9 @@ async function main() {
         })
         console.log(`Found ${publications.length} sales channel(s)`)
 
-        // 7. Download feed and process via search API
-        const feedCsv = await fetchFeed()
+        // 7. Load feed and process via search API
+        await downloadFeedIfNeeded()
+        const feedCsv = fs.readFileSync(FEED_CACHE_PATH, 'utf-8')
         const feedRows = parse(feedCsv, { columns: true, skip_empty_lines: true, relax_column_count: true })
 
         const itemNoSet = new Set()
