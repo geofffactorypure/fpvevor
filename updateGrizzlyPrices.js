@@ -284,9 +284,7 @@ async function main() {
             const dealerPrice = toNum(row['Dealer Price'])
             const rawShipping = (row['Dealer Shipping Cost'] || '').trim()
             const shippingCost =
-                rawShipping.toLowerCase() === 'see chart'
-                    ? lookupShippingCost(dealerPrice)
-                    : toNum(rawShipping)
+                rawShipping.toLowerCase() === 'see chart' ? lookupShippingCost(dealerPrice) : toNum(rawShipping)
             const dealerMap = toNum(row['Dealer MAP'])
 
             if (!msrp || !dealerPrice) continue
@@ -300,8 +298,7 @@ async function main() {
             const { price, margin } = calcPrice({ msrp, dealerPrice, shippingCost, dealerMap })
 
             if (margin < MIN_MARGIN) {
-                console.warn(`[${sku}] Skipping — margin ${(margin * 100).toFixed(1)}% is below 10% floor`)
-                continue
+                console.warn(`[${sku}] Warning — margin ${(margin * 100).toFixed(1)}% is below 10% floor (updating anyway)`)
             }
 
             priceMap.set(sku, {
