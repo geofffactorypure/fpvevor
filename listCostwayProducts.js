@@ -1117,6 +1117,24 @@ async function generateFiltersForNewProduct({ pool, productId, productType, prod
 }
 
 // ── Per-parent listing ──────────────────────────────────────────────────────
+async function findShopifyProductBySku(sku, storeInfo) {
+    const result = await shopifyGraphQL(
+        storeInfo,
+        `query getProductBySku($query: String!) {
+            productVariants(first: 1, query: $query) {
+                nodes {
+                    id
+                    product { id }
+                }
+            }
+        }`,
+        { query: `sku:'${sku}'` }
+    )
+    const node = result.data?.productVariants?.nodes?.[0]
+    if (!node) return null
+    return node.product.id
+}
+
 async function listOneParent({
     parentId,
     parentEntry,
@@ -1165,12 +1183,119 @@ async function listOneParent({
         console.log(`[${parentData.sku}] Already listed, skipping`)
         return null
     }
-    if (options.some((o) => o.sku && listedSkuSet.has(o.sku))) {
-        console.log(`[${parentSku}] Variant already listed, skipping`)
+
+    const isConfigurable = options.length > 1
+    const skuOptions = options.filter((o) => o.sku)
+    const alreadyListedOptions = skuOptions.filter((o) => listedSkuSet.has(o.sku))
+
+    if (alreadyListedOptions.length > 0 && alreadyListedOptions.length === skuOptions.length) {
+        console.log(`[${parentSku}] All variants already listed, skipping`)
         return null
     }
 
-    const isConfigurable = options.length > 1
+    // Handle partial case: some variants already listed — add only new ones to the existing product
+    if (isConfigurable && alreadyListedOptions.length > 0) {
+        const existingProductGid = await findShopifyProductBySku(alreadyListedOptions[0].sku, storeInfo)
+        if (!existingProductGid) {
+            console.log(
+                `[${parentSku}] Could not find existing Shopify product for SKU ${alreadyListedOptions[0].sku}, skipping`
+            )
+            return null
+        }
+        const productUrl = parentData.url_path
+            ? `https://www.costway.com/${parentData.url_path}`
+            : `https://www.costway.com/api/product/${parentId}`
+        // Parse all options first for correct dedup numbering, then filter to unlisted
+        const allParsed = parseVariantOptions(options)
+        const unlistedParsed = allParsed.filter(({ opt }) => !opt.sku || !listedSkuSet.has(opt.sku))
+        console.log(`[${parentSku}] Adding ${unlistedParsed.length} new variant(s) to existing product`)
+        const variantInputs = []
+        const media = []
+        for (const { name, value, opt } of unlistedParsed) {
+            const optionJson = await fetchProductWithFallback(opt.product_id)
+            const optSpecial =
+                parseFloat(opt.special_price) ||
+                parseFloat(parentData.price?.special_price) ||
+                parseFloat(parentData.price?.final_price) ||
+                0
+            const optOld = parseFloat(opt.old_special_price) || parseFloat(parentData.price?.price) || 0
+            const optCost = parseFloat((optSpecial * COSTWAY_DISCOUNT).toFixed(2))
+            const optPrice = parseFloat((optSpecial > 0 ? optSpecial - 1 : 0).toFixed(2))
+            const optCompare = optOld && optOld > optSpecial ? parseFloat((optOld - 1).toFixed(2)) : null
+            const itemNo = opt.sku || parentSku
+            let mediaSrc
+            if (optionJson?.gallery?.[0]?.original_image) {
+                const s3Url = await uploadGalleryImage(optionJson.gallery[0].original_image, STORE_ID).catch((err) => {
+                    console.error(`[${parentSku}] Failed to upload variant image: ${err.message}`)
+                    return null
+                })
+                if (s3Url) {
+                    media.push({ alt: optionJson.gallery[0].alt, mediaContentType: 'IMAGE', originalSource: s3Url })
+                    mediaSrc = s3Url
+                }
+            }
+            variantInputs.push({
+                mediaSrc,
+                price: String(optPrice),
+                ...(optCompare ? { compareAtPrice: String(optCompare) } : {}),
+                barcode: '',
+                taxable: true,
+                inventoryItem: { sku: itemNo, cost: String(optCost), tracked: true },
+                optionValues: [{ optionName: name, name: value }],
+                metafields: [
+                    { namespace: 'custom', key: 'supplier_sku', value: itemNo, type: 'single_line_text_field' },
+                    {
+                        namespace: 'custom',
+                        key: 'part_number',
+                        value: parentData.item_no,
+                        type: 'single_line_text_field',
+                    },
+                    {
+                        namespace: 'custom',
+                        key: 'projected_unit_cost',
+                        value: String(optCost),
+                        type: 'single_line_text_field',
+                    },
+                    {
+                        namespace: 'custom',
+                        key: 'projected_price',
+                        value: String(optPrice),
+                        type: 'single_line_text_field',
+                    },
+                    {
+                        namespace: 'custom',
+                        key: 'weblinks',
+                        value: JSON.stringify([{ link: productUrl, title: 'Manufacturer Website' }]),
+                        type: 'json',
+                    },
+                ],
+            })
+        }
+        if (variantInputs.length > 0) {
+            const createdVariants = await productVariantsBulkCreate(
+                {
+                    productId: existingProductGid,
+                    variants: variantInputs,
+                    strategy: 'APPEND',
+                    media: media.length > 0 ? media : undefined,
+                },
+                storeInfo
+            )
+            console.log(`[${parentSku}] ✓ Added ${createdVariants.length} new variant(s) to existing product`)
+            await createListingEvent(pool, {
+                product_id: parseInt(existingProductGid.split('/').pop()),
+                event_type: 'VARIANTS_ADDED',
+                event_data: JSON.stringify({
+                    source: 'AI_LISTER_SCRIPT_V2',
+                    sku: parentSku,
+                    parent_id: parentId,
+                    new_variant_count: createdVariants.length,
+                }),
+                store_id: STORE_ID,
+            }).catch((err) => console.error(`[${parentSku}] Failed to create listing event:`, err.message))
+        }
+        return { sku: parentSku, productId: existingProductGid }
+    }
 
     // 4. Parse option groups for configurable products
     let productOptions = null
@@ -1583,8 +1708,9 @@ async function main() {
             const candidates = parentIds.filter((id) => {
                 // if (listedItemNoSet.has(String(id))) return false
                 const opts = batch[id].options || []
-                if (opts.some((o) => o.sku && listedSkuSet.has(o.sku))) {
-                    console.log(`  Parent ${id} has options already listed, skipping...`)
+                const skuOpts = opts.filter((o) => o.sku)
+                if (skuOpts.length > 0 && skuOpts.every((o) => listedSkuSet.has(o.sku))) {
+                    console.log(`  Parent ${id}: all ${skuOpts.length} variant(s) already listed, skipping...`)
                     return false
                 }
                 return true
