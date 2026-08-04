@@ -24,8 +24,13 @@ const SHOPIFY_API_VERSION = '2026-01'
 
 const S3_BUCKET = 'fpdash-bucket'
 const S3_PRODUCT_PREFIX = 'costwaydata'
-const S3_PARENTS_PREFIX = 'costwaydata/configurableParents'
 const S3_CAT_PREFIX = 'costwaydata/categoryProducts'
+
+const MAX_RETRIES = 5
+const DELAY_MS = 400
+
+const FEED_URL = 'https://www.costway.com/media/feed/US-Dropship-Shopify.csv'
+const SEARCH_DELAY_MS = 400
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_AI_LISTER_API_KEY })
 const S3 = new AWSS3({ region: 'us-east-1' })
@@ -1116,6 +1121,51 @@ async function generateFiltersForNewProduct({ pool, productId, productType, prod
     }
 }
 
+// ── Feed / Search API ───────────────────────────────────────────────────────
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+async function fetchFeed() {
+    console.log(`Downloading feed from ${FEED_URL}...`)
+    const res = await fetch(FEED_URL, { headers: { 'User-Agent': 'Mozilla/5.0' } })
+    if (!res.ok) throw new Error(`Feed download failed: ${res.status}`)
+    const text = await res.text()
+    console.log(`Feed downloaded (${Math.round(Buffer.byteLength(text) / 1024 / 1024)} MB)`)
+    return text
+}
+
+async function searchApiForProduct(itemNo, retries = 5) {
+    const url = 'https://www.costway.com/searchApi/mobile/search'
+    const body = { keyword: itemNo, page: 1, pageSize: 48, userId: 0, isLogin: false }
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const res = await fetch(url, {
+                method: 'POST',
+                body: JSON.stringify(body),
+                headers: { 'Content-Type': 'application/json' },
+            })
+            if (res.status === 429) {
+                const waitMs = Math.min(60000, Math.pow(2, attempt) * 1000)
+                console.log(`  ⏳ 429 on search API, waiting ${waitMs}ms`)
+                await sleep(waitMs)
+                continue
+            }
+            if (!res.ok) {
+                await sleep(attempt * 1000)
+                continue
+            }
+            const result = await res.json()
+            return result?.data?.datalist?.[0] ?? null
+        } catch (err) {
+            if (attempt < retries) {
+                await sleep(attempt * 1000)
+                continue
+            }
+            return null
+        }
+    }
+    return null
+}
+
 // ── Per-parent listing ──────────────────────────────────────────────────────
 async function findShopifyProductBySku(sku, storeInfo) {
     const result = await shopifyGraphQL(
@@ -1137,25 +1187,23 @@ async function findShopifyProductBySku(sku, storeInfo) {
 
 async function listOneParent({
     parentId,
-    parentEntry,
     skuToProductType,
     listedSkuSet,
-    // listedItemNoSet,
     storeInfo,
     publications,
     additionalPrompt,
     brandDefaults,
     pool,
 }) {
-    // 1. Fetch parent product data from S3
+    // 1. Fetch parent product data
     const parentData = await fetchProductWithFallback(parentId)
     if (!parentData) {
-        console.log(`[parent:${parentId}] No S3 data found, skipping`)
+        console.log(`[parent:${parentId}] No data found, skipping`)
         return null
     }
 
     const parentSku = parentData.item_no || parentData.sku
-    const options = parentEntry.options || []
+    const options = parentData.relation || []
 
     // 2. Determine product type — try parentId directly (numeric entity ID), then parentSku, then each option SKU/product_id
     let productType = skuToProductType.get(String(parentId)) || skuToProductType.get(parentSku)
@@ -1680,96 +1728,65 @@ async function main() {
         })
         console.log(`Found ${publications.length} sales channel(s)`)
 
-        // 7. Iterate S3 configurable parent batches
-        let batchIndex = 0
+        // 7. Download feed and process via search API
+        const feedCsv = await fetchFeed()
+        const feedRows = parse(feedCsv, { columns: true, skip_empty_lines: true, relax_column_count: true })
+
+        const itemNoSet = new Set()
+        for (const row of feedRows) {
+            const itemNo = (row['Item No'] || '').trim()
+            const sku = (row['Variant SKU'] || '').trim()
+            if (itemNo && !listedSkuSet.has(sku)) itemNoSet.add(itemNo)
+        }
+        const itemNos = [...itemNoSet]
+        console.log(`\nFeed: ${feedRows.length} rows → ${itemNos.length} item_nos to process`)
+        console.log(`Listing up to ${LIMIT} product(s) with concurrency ${CONCURRENCY}...\n`)
+
         let totalListed = 0
         let totalFailed = 0
-        let batchesWithNoProgress = 0
-        const MAX_BATCHES_NO_PROGRESS = 500
+        const seenParentIds = new Set()
+        let itemIdx = 0
 
-        console.log(`\nListing up to ${LIMIT} product(s) with concurrency ${CONCURRENCY}...\n`)
-
-        while (totalListed < LIMIT) {
-            const batchKey = `${S3_PARENTS_PREFIX}/${batchIndex * 100}`
-            const batch = await getS3Json(batchKey)
-
-            if (!batch) {
-                console.log(`No more parent batches found at index ${batchIndex} (${batchKey}). Done.`)
-                batchIndex++
-                batchesWithNoProgress++
-                continue
+        while (totalListed < LIMIT && itemIdx < itemNos.length) {
+            // Collect up to CONCURRENCY parent IDs via search API (serial with rate-limit delay)
+            const chunk = []
+            while (chunk.length < CONCURRENCY && itemIdx < itemNos.length && totalListed + chunk.length < LIMIT) {
+                const itemNo = itemNos[itemIdx++]
+                const searchResult = await searchApiForProduct(itemNo)
+                await sleep(SEARCH_DELAY_MS)
+                if (!searchResult) {
+                    console.log(`[${itemNo}] No search result, skipping`)
+                    continue
+                }
+                const parentId = String(searchResult.parentId || searchResult.productId)
+                if (seenParentIds.has(parentId)) continue
+                seenParentIds.add(parentId)
+                chunk.push(parentId)
             }
 
-            const parentIds = Object.keys(batch)
-            console.log(`Batch ${batchIndex} (${batchKey}): ${parentIds.length} parent(s)`)
-            batchIndex++
+            if (chunk.length === 0) break
 
-            // Filter to parents not yet listed
-            const candidates = parentIds.filter((id) => {
-                // if (listedItemNoSet.has(String(id))) return false
-                const opts = batch[id].options || []
-                const skuOpts = opts.filter((o) => o.sku)
-                if (skuOpts.length > 0 && skuOpts.every((o) => listedSkuSet.has(o.sku))) {
-                    console.log(`  Parent ${id}: all ${skuOpts.length} variant(s) already listed, skipping...`)
-                    return false
-                }
-                return true
-            })
+            console.log(`\n── Chunk of ${chunk.length} product(s) ──\n`)
 
-            if (candidates.length === 0) {
-                console.log('  All parents in this batch already listed, skipping...')
-                batchesWithNoProgress++
-                if (batchesWithNoProgress >= MAX_BATCHES_NO_PROGRESS) {
-                    console.log(`No progress after ${MAX_BATCHES_NO_PROGRESS} consecutive batches. Done.`)
-                    break
-                }
-                continue
-            }
-
-            const toList = candidates
-            console.log(`  ${toList.length} candidate(s) to attempt this batch`)
-
-            const listedBefore = totalListed
-
-            for (let i = 0; i < toList.length; i += CONCURRENCY) {
-                const chunk = toList.slice(i, i + CONCURRENCY)
-                const chunkNum = Math.floor(i / CONCURRENCY) + 1
-                const totalChunks = Math.ceil(toList.length / CONCURRENCY)
-                console.log(`\n── Chunk ${chunkNum}/${totalChunks} (${chunk.length} products) ──\n`)
-
-                const results = await Promise.allSettled(
-                    chunk.map((parentId) =>
-                        listOneParent({
-                            parentId,
-                            parentEntry: batch[parentId],
-                            skuToProductType,
-                            listedSkuSet,
-                            // listedItemNoSet,
-                            storeInfo,
-                            publications,
-                            additionalPrompt,
-                            brandDefaults,
-                            pool,
-                        })
-                    )
+            const results = await Promise.allSettled(
+                chunk.map((parentId) =>
+                    listOneParent({
+                        parentId,
+                        skuToProductType,
+                        listedSkuSet,
+                        storeInfo,
+                        publications,
+                        additionalPrompt,
+                        brandDefaults,
+                        pool,
+                    })
                 )
-                for (const r of results) {
-                    if (r.status === 'fulfilled' && r.value) {
-                        totalListed++
-                        batchesWithNoProgress = 0
-                    } else if (r.status === 'rejected') {
-                        totalFailed++
-                        console.error('Product failed:', r.reason?.message || r.reason)
-                    }
-                }
-            }
-
-            if (totalListed === listedBefore) {
-                // Nothing was listed from this batch (all skipped)
-                batchesWithNoProgress++
-                if (batchesWithNoProgress >= MAX_BATCHES_NO_PROGRESS) {
-                    console.log(`No progress after ${MAX_BATCHES_NO_PROGRESS} consecutive batches. Done.`)
-                    break
+            )
+            for (const r of results) {
+                if (r.status === 'fulfilled' && r.value) totalListed++
+                else if (r.status === 'rejected') {
+                    totalFailed++
+                    console.error('Product failed:', r.reason?.message || r.reason)
                 }
             }
         }
