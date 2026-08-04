@@ -343,11 +343,19 @@ async function main() {
             if (shopifyData.hasSpecialPricing) {
                 const minPrice = Math.ceil((cost + shippingFee) / (1 - MIN_MARGIN))
                 if (price < minPrice) {
-                    console.log(`[${sku}] grizzly_special_pricing: raising $${price} → $${minPrice} to hit ${(MIN_MARGIN * 100).toFixed(0)}% margin`)
+                    console.log(
+                        `[${sku}] grizzly_special_pricing: raising $${price} → $${minPrice} to hit ${(MIN_MARGIN * 100).toFixed(0)}% margin`
+                    )
                     price = minPrice
                 }
             }
-            toUpdate.push({ sku, ...priceData, price, ...shopifyData })
+            const finalMargin = price > 0 ? (price - cost - shippingFee) / price : 0
+            let { quantity } = priceData
+            if (finalMargin < 0.07) {
+                console.warn(`[${sku}] Margin ${(finalMargin * 100).toFixed(1)}% < 7% — marking out of stock`)
+                quantity = 0
+            }
+            toUpdate.push({ sku, ...priceData, price, quantity, ...shopifyData })
         }
 
         console.log(`${toUpdate.length} SKU(s) matched to listed products (${notListedCount} in XLSX not yet listed)`)
