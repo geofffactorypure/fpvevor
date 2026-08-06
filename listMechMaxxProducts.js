@@ -877,9 +877,9 @@ async function main() {
     const pool = createPool()
 
     try {
-        // 1. Load the new MechMaxx latest CSV (mechmaxxlatest.csv)
-        console.log('Loading Mech Maxx latest product CSV...')
-        const latestCsvPath = new URL('./mechmaxxlatest.csv', import.meta.url)
+        // 1. Load the full MechMaxx product list (mechmax-products.csv)
+        console.log('Loading Mech Maxx full product CSV...')
+        const latestCsvPath = new URL('./mechmax-products.csv', import.meta.url)
         const latestCsvContent = fs.readFileSync(latestCsvPath, 'utf-8')
         const latestRows = parse(latestCsvContent, {
             columns: true,
@@ -934,7 +934,7 @@ async function main() {
                 UPC: '',
                 'Manufacturer Weblink': handle ? `https://mechmaxx.com/products/${handle}` : '',
                 'Product Type': productType,
-                Cost: row['Dealer Price']?.trim() || '',
+                Cost: row['Dropship Pricing']?.trim() || '',
                 'Lowest Price': row['Platform Selling Price']?.trim() || '',
                 'MAP Price': '',
                 MSRP: '',

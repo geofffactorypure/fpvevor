@@ -133,9 +133,9 @@ async function main() {
         }
         console.log(`Loaded ${skuTitleMap.size} SKU→title entries`)
 
-        // 3. Load mechmaxxlatest.csv → items to classify
-        console.log('Loading mechmaxxlatest.csv...')
-        const latestRows = parse(fs.readFileSync('./mechmaxxlatest.csv', 'utf-8'), {
+        // 3. Load mechmax-products.csv → items to classify
+        console.log('Loading mechmax-products.csv...')
+        const latestRows = parse(fs.readFileSync('./mechmax-products.csv', 'utf-8'), {
             columns: true,
             skip_empty_lines: true,
             relax_column_count: true,
@@ -146,12 +146,13 @@ async function main() {
             .map((row) => ({
                 sku: row['SKU']?.trim() || '',
                 modelNumber: row['Model Number']?.trim() || '',
-                title: skuTitleMap.get(row['SKU']?.trim()) || '',
+                // Prefer scraped Shopify title; fall back to catalog description
+                title: skuTitleMap.get(row['SKU']?.trim()) || row['Product Description']?.trim() || '',
             }))
             .filter((item) => item.sku && item.title)
 
         const skipped = latestRows.length - items.length
-        if (skipped > 0) console.warn(`Skipped ${skipped} row(s) with no matching title in mechmaxx_products.csv`)
+        if (skipped > 0) console.warn(`Skipped ${skipped} row(s) with no SKU or title`)
         console.log(`${items.length} products to classify`)
 
         // 4. Process in batches
