@@ -1094,18 +1094,26 @@ async function main() {
                 // Pricing rules:
                 //   - MAP present AND clears 10% margin → use MAP
                 //   - MAP present but below 10% margin → fall through to MSRP undercut rules
-                //   - No MAP (or MAP fell through) → try 5% discount off MSRP if margin >= 15%,
-                //     otherwise use full MSRP
-                // Hard 10% margin floor — skip the product entirely if even MSRP can't clear it.
-                const maxDiscount = Math.min(msrp * 0.05, 10)
-                const discounted = Math.round(msrp - maxDiscount) // whole dollar, capped at $10 off
+                //   - No MAP (or MAP fell through) → try 5% discount off effective MSRP if margin >= 15%,
+                //     otherwise use full effective MSRP
+                // effectiveMsrp = MSRP + shipping: the true delivered price a customer pays at Grizzly.
+                // Hard 10% margin floor — skip the product entirely if even effectiveMsrp can't clear it.
+                const effectiveMsrp = msrp + shippingCost
+                const maxDiscount = Math.min(effectiveMsrp * 0.05, 10)
+                const discounted = Math.round(effectiveMsrp - maxDiscount) // whole dollar, capped at $10 off
                 const discountedMargin = discounted > 0 ? (discounted - dealerPrice - shippingCost) / discounted : 0
-                const msrpFallback = discountedMargin >= 0.15 ? discounted : Math.round(msrp)
+                const msrpFallback = discountedMargin >= 0.15 ? discounted : Math.round(effectiveMsrp)
 
                 let price
                 if (dealerMap > 0) {
-                    const mapMargin = dealerMap > 0 ? (dealerMap - dealerPrice - shippingCost) / dealerMap : 0
-                    price = mapMargin >= MIN_MARGIN ? dealerMap : msrpFallback
+                    // effectiveMap = what a customer pays at Grizzly when buying at MAP (map + shipping)
+                    const effectiveMap = dealerMap + shippingCost
+                    const mapMaxDiscount = Math.min(effectiveMap * 0.05, 10)
+                    const discountedMap = Math.round(effectiveMap - mapMaxDiscount)
+                    const discountedMapMargin = discountedMap > 0 ? (discountedMap - dealerPrice - shippingCost) / discountedMap : 0
+                    const mapFallback = discountedMapMargin >= 0.15 ? discountedMap : Math.round(effectiveMap)
+                    const mapMargin = mapFallback > 0 ? (mapFallback - dealerPrice - shippingCost) / mapFallback : 0
+                    price = mapMargin >= MIN_MARGIN ? mapFallback : msrpFallback
                 } else {
                     price = msrpFallback
                 }
