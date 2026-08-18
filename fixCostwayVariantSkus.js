@@ -139,7 +139,10 @@ async function runWithConcurrency(tasks, limit) {
     const results = []
     const executing = new Set()
     for (const task of tasks) {
-        const p = task().then((r) => { executing.delete(p); return r })
+        const p = task().then((r) => {
+            executing.delete(p)
+            return r
+        })
         executing.add(p)
         results.push(p)
         if (executing.size >= limit) await Promise.race(executing)

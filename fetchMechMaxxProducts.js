@@ -85,7 +85,7 @@ async function main() {
     console.log(`\nSaved ${rows.length - 1} products to ${OUTPUT_FILE}`)
 }
 
-main().catch(err => {
+main().catch((err) => {
     console.error(err)
     process.exit(1)
 })

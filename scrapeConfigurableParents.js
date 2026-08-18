@@ -3,7 +3,7 @@ config({ path: './.env' })
 config({ path: './.env.local', override: true })
 
 import fetch from 'node-fetch'
-import { S3 as AWSS3, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
+import { S3 as AWSS3, PutObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3'
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const START_ID = parseInt(process.argv[2]) || 1
@@ -111,7 +111,7 @@ function buildParentEntry(result) {
 // ── Main ────────────────────────────────────────────────────────────────────
 async function main() {
     console.log('Loading progress from S3…')
-    let progress = (await getS3Json(S3_PROGRESS_KEY)) ?? { lastProcessedId: START_ID - 1, configurableCount: 0 }
+    let progress = { lastProcessedId: START_ID - 1, configurableCount: 0 }
 
     const resumeFrom = Math.max(START_ID, (progress.lastProcessedId ?? START_ID - 1) + 1)
     let configurableCount = progress.configurableCount || 0

@@ -7,7 +7,7 @@
  *
  * Pricing:
  *   List price   = MechMaxx store price  (price match)
- *   Variant cost = Dealer Price from mechmaxxlatest.csv (if SKU present)
+ *   Variant cost = Dropship Pricing from mechmaxx-price-reset.csv (if SKU present)
  *
  * Usage:
  *   node updateMechMaxxPrices.js            # live update
@@ -210,22 +210,27 @@ async function main() {
         const mechMaxxPrices = await fetchMechMaxxPrices()
         console.log(`Fetched ${mechMaxxPrices.size} SKU(s) from MechMaxx store\n`)
 
-        // 2. Optionally load mechmaxxlatest.csv for dealer cost
+        // 2. Load dealer costs from mechmaxx-price-reset.csv (Dropship Pricing column)
+        //    SKU cells can contain multiple slash-separated values (e.g. 110200/110200Y)
         const costMap = new Map()
-        const csvPath = new URL('./mechmaxxlatest.csv', import.meta.url)
-        if (fs.existsSync(csvPath)) {
-            const rows = parse(fs.readFileSync(csvPath, 'utf-8'), {
+        const costCsvPath = new URL('./mechmaxx-price-reset.csv', import.meta.url)
+        if (fs.existsSync(costCsvPath)) {
+            const rows = parse(fs.readFileSync(costCsvPath, 'utf-8'), {
                 columns: true,
                 skip_empty_lines: true,
                 relax_column_count: true,
                 bom: true,
             })
             for (const row of rows) {
-                const sku = row['SKU']?.trim()
-                const cost = parseFloat((row['Dealer Price'] || '').replace(/[^0-9.]/g, '')) || 0
-                if (sku && cost) costMap.set(sku, cost)
+                const skuCell = row['SKU']?.trim() || ''
+                const cost = parseFloat((row['Dropship Pricing'] || '').replace(/[^0-9.]/g, '')) || 0
+                if (!skuCell || !cost) continue
+                for (const s of skuCell.split('/')) {
+                    const sku = s.trim()
+                    if (sku) costMap.set(sku, cost)
+                }
             }
-            console.log(`Loaded ${costMap.size} dealer cost(s) from mechmaxxlatest.csv\n`)
+            console.log(`Loaded ${costMap.size} dealer cost(s) from mechmaxx-price-reset.csv\n`)
         }
 
         // 3. Get store info
@@ -257,9 +262,7 @@ async function main() {
             })
         }
 
-        console.log(
-            `${toUpdate.length} SKU(s) matched | ${notInMechMaxxCount} listed but not found in MechMaxx store`
-        )
+        console.log(`${toUpdate.length} SKU(s) matched | ${notInMechMaxxCount} listed but not found in MechMaxx store`)
 
         if (toUpdate.length === 0) {
             console.log('Nothing to update. Exiting.')
@@ -269,9 +272,10 @@ async function main() {
         if (DRY_RUN) {
             console.log('\n[DRY RUN] Sample of planned updates (first 25):')
             for (const row of toUpdate.slice(0, 25)) {
-                const priceTag = row.price !== row.currentPrice
-                    ? `$${row.currentPrice.toFixed(2)} → $${row.price.toFixed(2)}`
-                    : `$${row.price.toFixed(2)} (unchanged)`
+                const priceTag =
+                    row.price !== row.currentPrice
+                        ? `$${row.currentPrice.toFixed(2)} → $${row.price.toFixed(2)}`
+                        : `$${row.price.toFixed(2)} (unchanged)`
                 const costTag = row.cost ? ` | cost=$${row.cost.toFixed(2)}` : ''
                 console.log(`  [${row.sku}] price=${priceTag}${costTag}`)
             }
@@ -299,9 +303,7 @@ async function main() {
                         })
                         const priceChanged = row.price !== row.currentPrice
                         if (priceChanged) {
-                            console.log(
-                                `  ✓ [${row.sku}] $${row.currentPrice.toFixed(2)} → $${row.price.toFixed(2)}`
-                            )
+                            console.log(`  ✓ [${row.sku}] $${row.currentPrice.toFixed(2)} → $${row.price.toFixed(2)}`)
                         } else {
                             unchanged++
                         }
@@ -314,7 +316,9 @@ async function main() {
             )
         }
 
-        console.log(`\nDone. Updated: ${updated} (${updated - unchanged} price changes, ${unchanged} refreshed), Failed: ${failed}`)
+        console.log(
+            `\nDone. Updated: ${updated} (${updated - unchanged} price changes, ${unchanged} refreshed), Failed: ${failed}`
+        )
     } finally {
         pool.end()
     }

@@ -30,14 +30,26 @@ const STORE_ID = 1
 const SHOPIFY_API_VERSION = '2026-01'
 const DRY_RUN = process.argv.includes('--dry-run')
 const CONCURRENCY = 5
+const DELIVERY_PROFILE_NAME = 'FactoryPure Shipping'
 
 const brandArgIdx = process.argv.indexOf('--brand')
 const BRAND_FILTER = brandArgIdx !== -1 ? process.argv[brandArgIdx + 1]?.trim() : null
 
+const limitArgIdx = process.argv.indexOf('--limit')
+const LIMIT = (() => {
+    // Support both --limit=1 and --limit 1
+    const eqArg = process.argv.find((a) => a.startsWith('--limit='))
+    if (eqArg) return parseInt(eqArg.split('=')[1]) || 1
+    const spaceIdx = process.argv.indexOf('--limit')
+    if (spaceIdx !== -1) return parseInt(process.argv[spaceIdx + 1]) || 1
+    return Infinity
+})()
+
 const { DB_PASSWORD, DB_WRITE_HOST, DB_USER } = process.env
 
 // ── Pricing Logic (mirrors listGrizzlyProducts.js) ─────────────────────────
-const MIN_MARGIN = 0.1
+const MIN_MARGIN = 0.07
+const TARGET_CROSS_SELL_MARGIN = 0.1
 
 // Shipping chart lookup for "See Chart" rows
 function lookupShippingCost(dealerPrice) {
@@ -48,29 +60,33 @@ function lookupShippingCost(dealerPrice) {
     return 8.99
 }
 
+// Price formatting helpers — all Grizzly prices end in .95
+const to95 = (p) => Math.floor(p - 0.95) + 0.95 // largest  .95 price ≤ p (use for discounts)
+const to95Ceil = (p) => Math.ceil(p - 0.95) + 0.95 // smallest .95 price ≥ p (use for MAP floors)
+const to99 = (p) => Math.floor(p - 0.99) + 0.99 // largest  .99 price ≤ p (use for shipping)
+
 function calcPrice({ msrp, dealerPrice, shippingCost, dealerMap }) {
-    // effectiveMsrp = what a customer pays at Grizzly (list price + shipping)
-    const effectiveMsrp = msrp + shippingCost
-    const maxDiscount = Math.min(effectiveMsrp * 0.05, 10)
-    const discounted = Math.round(effectiveMsrp - maxDiscount)
-    const discountedMargin = discounted > 0 ? (discounted - dealerPrice - shippingCost) / discounted : 0
-    const msrpFallback = discountedMargin >= 0.15 ? discounted : Math.round(effectiveMsrp)
+    // Shipping always goes to the custom.shipping_fee metafield — never baked into list price.
+    // Margin = (price - dealerPrice) / (price + shippingCost)
+    // Customer pays price + shippingCost (via carrier service), we pay dealerPrice + shippingCost.
+    const calcMgn = (p) => (p + shippingCost > 0 ? (p - dealerPrice) / (p + shippingCost) : 0)
+
+    // No-MAP path: undercut MSRP by up to 5% (capped at $10); use discounted price if margin >= 15%
+    const maxDiscount = Math.min(msrp * 0.05, 10)
+    const discounted = to95(msrp - maxDiscount)
+    const msrpFallback = calcMgn(discounted) >= 0.15 ? discounted : to95(msrp)
 
     let price
     if (dealerMap > 0) {
-        // effectiveMap = what a customer pays at Grizzly when buying at MAP (map + shipping)
-        const effectiveMap = dealerMap + shippingCost
-        const mapMaxDiscount = Math.min(effectiveMap * 0.05, 10)
-        const discountedMap = Math.round(effectiveMap - mapMaxDiscount)
-        const discountedMapMargin = discountedMap > 0 ? (discountedMap - dealerPrice - shippingCost) / discountedMap : 0
-        const mapFallback = discountedMapMargin >= 0.15 ? discountedMap : Math.round(effectiveMap)
-        const mapMargin = mapFallback > 0 ? (mapFallback - dealerPrice - shippingCost) / mapFallback : 0
-        price = mapMargin >= MIN_MARGIN ? mapFallback : msrpFallback
+        // MAP path: list price = lowest .95 price at or above MAP.
+        // Fall back to msrpFallback if MAP can't clear MIN_MARGIN (MAP is a floor, not a ceiling).
+        const mapPrice = to95Ceil(dealerMap)
+        price = calcMgn(mapPrice) >= MIN_MARGIN ? mapPrice : msrpFallback
     } else {
         price = msrpFallback
     }
 
-    const margin = price > 0 ? (price - dealerPrice - shippingCost) / price : 0
+    const margin = calcMgn(price)
     return { price, margin }
 }
 
@@ -215,6 +231,55 @@ async function updateVariantPriceAndCost({ storeInfo, productGid, variantGid, pr
     if (errors?.length > 0) throw new Error(`Variant update errors: ${JSON.stringify(errors)}`)
 }
 
+// Set custom.shipping_fee metafield on a variant
+async function setShippingFeeMetafield({ storeInfo, variantGid, shippingFee }) {
+    const data = await shopifyGraphQL(
+        storeInfo,
+        `mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) {
+                userErrors { field message }
+            }
+        }`,
+        {
+            metafields: [
+                {
+                    ownerId: variantGid,
+                    namespace: 'custom',
+                    key: 'shipping_fee',
+                    type: 'number_decimal',
+                    value: String(shippingFee),
+                },
+            ],
+        }
+    )
+    const errors = data.metafieldsSet?.userErrors
+    if (errors?.length > 0) throw new Error(`Metafield set errors: ${JSON.stringify(errors)}`)
+}
+
+async function setCustomerShippingFeeMetafield({ storeInfo, variantGid, customerShippingFee }) {
+    const data = await shopifyGraphQL(
+        storeInfo,
+        `mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) {
+                userErrors { field message }
+            }
+        }`,
+        {
+            metafields: [
+                {
+                    ownerId: variantGid,
+                    namespace: 'custom',
+                    key: 'customer_shipping_fee',
+                    type: 'number_decimal',
+                    value: String(customerShippingFee),
+                },
+            ],
+        }
+    )
+    const errors = data.metafieldsSet?.userErrors
+    if (errors?.length > 0) throw new Error(`Metafield set errors: ${JSON.stringify(errors)}`)
+}
+
 // Set absolute inventory quantity at a location
 async function setInventoryQuantity({ storeInfo, inventoryItemId, locationId, quantity }) {
     const data = await shopifyGraphQL(
@@ -244,6 +309,47 @@ async function setInventoryQuantity({ storeInfo, inventoryItemId, locationId, qu
     if (errors?.length > 0) throw new Error(`Inventory set errors: ${JSON.stringify(errors)}`)
 }
 
+// Find a delivery profile by name; returns its GID or null
+async function fetchDeliveryProfileId(storeInfo, name) {
+    let cursor = null
+    do {
+        const data = await shopifyGraphQL(
+            storeInfo,
+            `query($cursor: String) {
+                deliveryProfiles(first: 20, after: $cursor) {
+                    pageInfo { hasNextPage }
+                    edges {
+                        cursor
+                        node { id name }
+                    }
+                }
+            }`,
+            { cursor }
+        )
+        for (const edge of data.deliveryProfiles.edges) {
+            if (edge.node.name === name) return edge.node.id
+        }
+        cursor = data.deliveryProfiles.pageInfo.hasNextPage ? data.deliveryProfiles.edges.at(-1).cursor : null
+    } while (cursor)
+    return null
+}
+
+// Add variant GIDs to an existing delivery profile
+async function assignVariantsToDeliveryProfile(storeInfo, profileId, variantGids) {
+    const data = await shopifyGraphQL(
+        storeInfo,
+        `mutation deliveryProfileUpdate($id: ID!, $profile: DeliveryProfileInput!) {
+            deliveryProfileUpdate(id: $id, profile: $profile) {
+                profile { id name }
+                userErrors { field message }
+            }
+        }`,
+        { id: profileId, profile: { variantsToAssociate: variantGids } }
+    )
+    const errors = data.deliveryProfileUpdate?.userErrors
+    if (errors?.length > 0) throw new Error(`Delivery profile update errors: ${JSON.stringify(errors)}`)
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 async function main() {
     console.log('\n═══ Update Grizzly Prices ═══')
@@ -269,7 +375,25 @@ async function main() {
         })
         console.log(`Loaded ${rows.length} rows from grizzly_price_list_latest.csv`)
 
-        // 2. Parse rows and compute prices using same logic as listGrizzlyProducts.js
+        // 2. Load grizzly_unlisted_cross_sells.csv for cross-sell price rescue
+        const crossSellsCsvPath = new URL('./grizzly_unlisted_cross_sells.csv', import.meta.url)
+        const crossSellSkuSet = new Set()
+        if (fs.existsSync(crossSellsCsvPath)) {
+            const csRows = parse(fs.readFileSync(crossSellsCsvPath, 'utf-8'), {
+                columns: true,
+                skip_empty_lines: true,
+                relax_column_count: true,
+                relax_quotes: true,
+                bom: true,
+            })
+            for (const r of csRows) {
+                const s = r['accessory_sku']?.trim()
+                if (s && (r['listed'] || '').toLowerCase() !== 'yes') crossSellSkuSet.add(s.toUpperCase())
+            }
+            console.log(`Loaded ${crossSellSkuSet.size} unlisted cross-sell SKUs from grizzly_unlisted_cross_sells.csv`)
+        }
+
+        // 3. Parse rows and compute prices using same logic as listGrizzlyProducts.js
         const priceMap = new Map() // sku → pricing data
 
         for (const row of rows) {
@@ -298,18 +422,51 @@ async function main() {
             const itemStatus = row['Item Status']?.trim() || ''
             const quantity = itemStatus.toLowerCase() === 'available' ? 100 : 0
 
-            const { price, margin } = calcPrice({ msrp, dealerPrice, shippingCost, dealerMap })
+            let { price, margin } = calcPrice({ msrp, dealerPrice, shippingCost, dealerMap })
+
+            // Cross-sell rescue: raise to 10% margin if SKU is an unlisted cross-sell
+            if (crossSellSkuSet.has(sku.toUpperCase()) && margin < TARGET_CROSS_SELL_MARGIN) {
+                // Solve (p - dealerPrice) / (p + shippingCost) = TARGET → p = (dealerPrice + TARGET * shippingCost) / (1 - TARGET)
+                const minPrice = Math.ceil(
+                    (dealerPrice + TARGET_CROSS_SELL_MARGIN * shippingCost) / (1 - TARGET_CROSS_SELL_MARGIN)
+                )
+                if (minPrice > price) {
+                    console.log(
+                        `[${sku}] cross-sell rescue: $${price} → $${minPrice} (margin ${(margin * 100).toFixed(1)}% → ${TARGET_CROSS_SELL_MARGIN * 100}%)`
+                    )
+                    price = minPrice
+                    margin = (price - dealerPrice) / (price + shippingCost)
+                }
+            }
 
             if (margin < MIN_MARGIN) {
                 console.warn(
-                    `[${sku}] Warning — margin ${(margin * 100).toFixed(1)}% is below 10% floor (updating anyway)`
+                    `[${sku}] Warning — margin ${(margin * 100).toFixed(1)}% is below ${(MIN_MARGIN * 100).toFixed(0)}% floor (updating anyway)`
                 )
+            }
+
+            // Undercut strategy:
+            // - MSRP items: price discount already applied in calcPrice (up to 5% / $10 off MSRP)
+            // - MAP items: price is locked at MAP, so undercut on customer shipping instead
+            let customerShippingFee = shippingCost
+            if (dealerMap > 0) {
+                const shipDiscount = Math.min(shippingCost * 0.05, 10)
+                const discountedShipping = Math.max(shippingCost - shipDiscount, 0)
+                const discountedMargin =
+                    (price + discountedShipping - dealerPrice - shippingCost) / (price + discountedShipping)
+                if (discountedMargin >= MIN_MARGIN) {
+                    customerShippingFee = to99(discountedShipping)
+                    console.log(
+                        `[${sku}] MAP shipping undercut: $${shippingCost.toFixed(2)} → $${customerShippingFee.toFixed(2)} (margin ${(discountedMargin * 100).toFixed(1)}%)`
+                    )
+                }
             }
 
             priceMap.set(sku, {
                 price,
                 cost: dealerPrice,
                 shippingFee: shippingCost,
+                customerShippingFee,
                 mapPrice: dealerMap,
                 msrp,
                 quantity,
@@ -320,17 +477,17 @@ async function main() {
 
         console.log(`Parsed ${priceMap.size} SKUs with valid pricing from CSV`)
 
-        // 3. Get store info
+        // 4. Get store info
         const [storeInfo] = await query(pool, `SELECT * FROM stores WHERE id = ?`, [STORE_ID])
         if (!storeInfo) throw new Error(`Store ${STORE_ID} not found`)
         console.log(`Using store: ${storeInfo.shopify_name}`)
 
-        // 4. Fetch all already-listed Grizzly variants from Shopify
+        // 5. Fetch all already-listed Grizzly variants from Shopify
         console.log('\nFetching listed variants from Shopify...')
         const variantMap = await fetchListedVariants(storeInfo)
         console.log(`\nFetched ${variantMap.size} total variant(s) from Shopify\n`)
 
-        // 5. Match XLSX SKUs to listed Shopify variants
+        // 6. Match XLSX SKUs to listed Shopify variants
         const toUpdate = []
         let notListedCount = 0
         for (const [sku, priceData] of priceMap) {
@@ -341,7 +498,10 @@ async function main() {
             }
             let { price, cost, shippingFee } = priceData
             if (shopifyData.hasSpecialPricing) {
-                const minPrice = Math.ceil((cost + shippingFee) / (1 - MIN_MARGIN))
+                // margin = (price + customerShippingFee - cost - shippingFee) / (price + customerShippingFee)
+                // When customerShippingFee == shippingFee: (price - cost) / (price + shippingFee)
+                // Solve for p at MIN_MARGIN: p = (cost + MIN_MARGIN * shippingFee) / (1 - MIN_MARGIN)
+                const minPrice = Math.ceil((cost + MIN_MARGIN * shippingFee) / (1 - MIN_MARGIN))
                 if (price < minPrice) {
                     console.log(
                         `[${sku}] grizzly_special_pricing: raising $${price} → $${minPrice} to hit ${(MIN_MARGIN * 100).toFixed(0)}% margin`
@@ -349,11 +509,19 @@ async function main() {
                     price = minPrice
                 }
             }
-            const finalMargin = price > 0 ? (price - cost - shippingFee) / price : 0
-            let { quantity } = priceData
+            // Revenue = price + customerShippingFee; cost to us = cost + shippingFee
+            // Since customerShippingFee == shippingFee: margin = (price - cost) / (price + shippingFee)
+            let { customerShippingFee } = priceData
+            const finalMargin =
+                price + customerShippingFee > 0
+                    ? (price + customerShippingFee - cost - shippingFee) / (price + customerShippingFee)
+                    : 0
+            const { quantity } = priceData
             if (finalMargin < 0.07) {
-                console.warn(`[${sku}] Margin ${(finalMargin * 100).toFixed(1)}% < 7% — marking out of stock`)
-                quantity = 0
+                // Warn only — CSV Item Status drives inventory
+                console.warn(
+                    `[${sku}] Low margin ${(finalMargin * 100).toFixed(1)}% (price $${price}, cost $${cost}, ship-dealer $${shippingFee}, ship-customer $${customerShippingFee})`
+                )
             }
             toUpdate.push({ sku, ...priceData, price, quantity, ...shopifyData })
         }
@@ -365,9 +533,13 @@ async function main() {
             return
         }
 
+        // Apply limit if set
+        const batch = LIMIT < Infinity ? toUpdate.slice(0, LIMIT) : toUpdate
+        if (LIMIT < Infinity) console.log(`\n--limit=${LIMIT}: processing ${batch.length} SKU(s)\n`)
+
         if (DRY_RUN) {
             console.log('\n[DRY RUN] Sample of planned updates (first 25):')
-            for (const row of toUpdate.slice(0, 25)) {
+            for (const row of batch.slice(0, 25)) {
                 const priceChange =
                     Math.abs(row.currentPrice - row.price) > 0.01
                         ? ` (was $${row.currentPrice.toFixed(2)})`
@@ -376,23 +548,32 @@ async function main() {
                     `  ${row.sku}: price=$${row.price.toFixed(2)}${priceChange}  cost=$${row.cost.toFixed(2)}  qty=${row.quantity} [${row.itemStatus}]`
                 )
             }
-            if (toUpdate.length > 25) console.log(`  … and ${toUpdate.length - 25} more`)
+            if (batch.length > 25) console.log(`  … and ${batch.length - 25} more`)
             return
         }
 
-        // 6. Get primary location for inventory
+        // 7. Get primary location for inventory
         const locationId = await getPrimaryLocationId(storeInfo)
+
+        // Look up the FactoryPure Shipping delivery profile
+        console.log(`\nLooking up "${DELIVERY_PROFILE_NAME}" delivery profile...`)
+        const deliveryProfileId = await fetchDeliveryProfileId(storeInfo, DELIVERY_PROFILE_NAME)
+        if (deliveryProfileId) {
+            console.log(`Found delivery profile: ${deliveryProfileId}`)
+        } else {
+            console.warn(`Delivery profile "${DELIVERY_PROFILE_NAME}" not found — skipping profile assignment`)
+        }
         console.log()
 
-        // 7. Update in concurrent batches
+        // 8. Update in concurrent batches
         let successCount = 0
         let failCount = 0
 
-        for (let i = 0; i < toUpdate.length; i += CONCURRENCY) {
-            const batch = toUpdate.slice(i, i + CONCURRENCY)
+        for (let i = 0; i < batch.length; i += CONCURRENCY) {
+            const chunk = batch.slice(i, i + CONCURRENCY)
 
             const results = await Promise.allSettled(
-                batch.map(async (row) => {
+                chunk.map(async (row) => {
                     // Update price and cost
                     await updateVariantPriceAndCost({
                         storeInfo,
@@ -400,6 +581,18 @@ async function main() {
                         variantGid: row.variantGid,
                         price: row.price,
                         cost: row.cost,
+                    })
+
+                    // Set dealer shipping fee and customer shipping fee metafields on the variant
+                    await setShippingFeeMetafield({
+                        storeInfo,
+                        variantGid: row.variantGid,
+                        shippingFee: row.shippingFee,
+                    })
+                    await setCustomerShippingFeeMetafield({
+                        storeInfo,
+                        variantGid: row.variantGid,
+                        customerShippingFee: row.customerShippingFee,
                     })
 
                     // Set inventory quantity
@@ -414,8 +607,13 @@ async function main() {
                         console.warn(`[${row.sku}] No inventoryItemId — skipping inventory update`)
                     }
 
+                    // Assign to shipping profile immediately after update
+                    if (deliveryProfileId) {
+                        await assignVariantsToDeliveryProfile(storeInfo, deliveryProfileId, [row.variantGid])
+                    }
+
                     console.log(
-                        `[${row.sku}] ✓ price=$${row.price.toFixed(2)}  cost=$${row.cost.toFixed(2)}  qty=${row.quantity} [${row.itemStatus}]`
+                        `[${row.sku}] ✓ price=$${row.price.toFixed(2)}  cost=$${row.cost.toFixed(2)}  ship-dealer=$${row.shippingFee.toFixed(2)}  ship-customer=$${row.customerShippingFee.toFixed(2)}  qty=${row.quantity} [${row.itemStatus}]`
                     )
                 })
             )

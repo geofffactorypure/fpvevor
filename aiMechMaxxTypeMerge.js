@@ -77,15 +77,16 @@ Rules:
 async function matchBatch(batch, existingTypes) {
     const prompt = `Existing product types:\n${existingTypes.join('\n')}\n\nProducts to classify:\n${JSON.stringify(batch, null, 2)}\n\nRespond with a JSON array: [{ "sku": "...", "mappedType": "...", "isNew": true|false }, ...]`
 
-    const response = await openai.responses.create({
+    const response = await openai.chat.completions.create({
         model: 'gpt-4o',
-        input: [
+        messages: [
             { role: 'system', content: SYSTEM_PROMPT },
             { role: 'user', content: prompt },
         ],
+        temperature: 0,
     })
 
-    const raw = response.output_text
+    const raw = (response.choices[0].message.content || '')
         .trim()
         .replace(/^```(?:json)?\s*/i, '')
         .replace(/\s*```$/, '')

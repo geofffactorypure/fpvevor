@@ -12,7 +12,9 @@ import { parse } from 'csv-parse/sync'
 import { S3 as AWSS3 } from '@aws-sdk/client-s3'
 import { Upload } from '@aws-sdk/lib-storage'
 import { JSDOM, VirtualConsole } from 'jsdom'
+import { chromium as patchright } from 'patchright'
 import jwt from 'jsonwebtoken'
+import { listedVevorSkus } from './listedVevorSkus.js'
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const VEVOR_ENDPOINT = process.env.VEVOR_ENDPOINT
@@ -344,7 +346,7 @@ async function generateListingObject({ product_url, title, additional_prompt }) 
             tools: [{ type: 'web_search' }],
             input: finalListingPrompt,
         }),
-        scrapeProductImages(product_url),
+        getImagesWithPatchwright(product_url),
     ])
 
     let listingObject = listingResponse.output_text
@@ -839,11 +841,13 @@ async function main() {
         console.log(`Feed has ${feedRows.length} total rows`)
 
         // 3. Filter feed rows to matching SKUs (exclude already-listed)
-        console.log('Loading listed Vevor SKUs from database...')
-        const listedSkuRows = await query(
-            pool,
-            `SELECT vn.sku FROM variants_new vn JOIN products p ON p.id = vn.product_id WHERE p.vendor = 'Vevor' AND vn.sku IS NOT NULL`
-        )
+        // console.log('Loading listed Vevor SKUs from database...')
+        // const listedSkuRows = await query(
+        //     pool,
+        //     `SELECT vn.sku FROM variants_new vn JOIN products p ON p.id = vn.product_id WHERE p.vendor = 'Vevor' AND vn.sku IS NOT NULL`
+        // )
+        console.log('Loading SKUs from file')
+        const listedSkuRows = listedVevorSkus
         const listedSkuSet = new Set(listedSkuRows.map((r) => r.sku))
         const matchingProducts = feedRows.filter((row) => {
             const sku = (row['SKU'] || '').trim()
@@ -1113,3 +1117,20 @@ main().catch((err) => {
 })
 
 // image getter - Array.from(document.querySelectorAll('.DM_LTL-preview-img')).map(el => el.querySelector('img').src)
+
+async function getImagesWithPatchwright(url) {
+    const browser = await patchright.launch({ headless: true })
+    const page = await browser.newPage()
+    await page.goto(url, { waitUntil: 'commit' })
+    await new Promise((r) => setTimeout(r, 1000))
+
+    const images = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('.DM_LTL-preview-img img')).map((img) => ({
+            alt: img.alt,
+            mediaContentType: 'IMAGE',
+            originalSource: img.dataset.src || img.src,
+        }))
+    })
+    await browser.close()
+    return images.filter((_, i) => i % 2 === 0)
+}
