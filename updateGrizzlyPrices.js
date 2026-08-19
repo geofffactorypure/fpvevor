@@ -60,10 +60,8 @@ function lookupShippingCost(dealerPrice) {
     return 8.99
 }
 
-// Price formatting helpers — all Grizzly prices end in .95
-const to95 = (p) => Math.floor(p - 0.95) + 0.95 // largest  .95 price ≤ p (use for discounts)
-const to95Ceil = (p) => Math.ceil(p - 0.95) + 0.95 // smallest .95 price ≥ p (use for MAP floors)
-const to99 = (p) => Math.floor(p - 0.99) + 0.99 // largest  .99 price ≤ p (use for shipping)
+// Round the discount amount to the nearest dollar so original prices keep their cents
+const roundDollar = (p) => Math.round(p)
 
 function calcPrice({ msrp, dealerPrice, shippingCost, dealerMap }) {
     // Shipping always goes to the custom.shipping_fee metafield — never baked into list price.
@@ -71,17 +69,16 @@ function calcPrice({ msrp, dealerPrice, shippingCost, dealerMap }) {
     // Customer pays price + shippingCost (via carrier service), we pay dealerPrice + shippingCost.
     const calcMgn = (p) => (p + shippingCost > 0 ? (p - dealerPrice) / (p + shippingCost) : 0)
 
-    // No-MAP path: undercut MSRP by up to 5% (capped at $10); use discounted price if margin >= 15%
+    // No-MAP path: undercut MSRP by up to 5% (capped at $10); round the discount, keep original cents
     const maxDiscount = Math.min(msrp * 0.05, 10)
-    const discounted = to95(msrp - maxDiscount)
-    const msrpFallback = calcMgn(discounted) >= 0.15 ? discounted : to95(msrp)
+    const discounted = msrp - roundDollar(maxDiscount)
+    const msrpFallback = calcMgn(discounted) >= 0.15 ? discounted : msrp
 
     let price
     if (dealerMap > 0) {
-        // MAP path: list price = lowest .95 price at or above MAP.
+        // MAP path: list price = MAP as-is (no rounding — undercut happens on shipping instead).
         // Fall back to msrpFallback if MAP can't clear MIN_MARGIN (MAP is a floor, not a ceiling).
-        const mapPrice = to95Ceil(dealerMap)
-        price = calcMgn(mapPrice) >= MIN_MARGIN ? mapPrice : msrpFallback
+        price = calcMgn(dealerMap) >= MIN_MARGIN ? dealerMap : msrpFallback
     } else {
         price = msrpFallback
     }
@@ -451,11 +448,12 @@ async function main() {
             let customerShippingFee = shippingCost
             if (dealerMap > 0) {
                 const shipDiscount = Math.min(shippingCost * 0.05, 10)
-                const discountedShipping = Math.max(shippingCost - shipDiscount, 0)
+                // Round the discount amount; subtract from original so original cents are preserved
+                const discountedShipping = Math.max(shippingCost - roundDollar(shipDiscount), 0)
                 const discountedMargin =
                     (price + discountedShipping - dealerPrice - shippingCost) / (price + discountedShipping)
                 if (discountedMargin >= MIN_MARGIN) {
-                    customerShippingFee = to99(discountedShipping)
+                    customerShippingFee = discountedShipping
                     console.log(
                         `[${sku}] MAP shipping undercut: $${shippingCost.toFixed(2)} → $${customerShippingFee.toFixed(2)} (margin ${(discountedMargin * 100).toFixed(1)}%)`
                     )
