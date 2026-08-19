@@ -204,7 +204,7 @@ async function updateInventoryPolicy({ storeInfo, productGid, variantGid, invent
                 userErrors { field message }
             }
         }`,
-        { productId: productGid, variants: [{ id: variantGid, inventoryPolicy }] }
+        { productId: productGid, variants: [{ id: variantGid, inventoryPolicy, inventoryItem: { tracked: true } }] }
     )
     const errors = data.productVariantsBulkUpdate?.userErrors
     if (errors?.length > 0) throw new Error(`Inventory policy errors: ${JSON.stringify(errors)}`)
