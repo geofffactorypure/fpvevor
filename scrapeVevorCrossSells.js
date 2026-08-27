@@ -323,15 +323,8 @@ async function main() {
                 batch.map(async (product) => {
                     const { sku, vevorUrl, admin_graphql_api_id, title, id } = product
 
-                    // Get internal goodSn from Vevor page, then fetch cross-sells via API
-                    const internalGoodSn = await getInternalGoodSn(vevorUrl)
-                    if (!internalGoodSn) {
-                        console.log(`  [${sku}] Skip: could not extract goodSn from ${vevorUrl}`)
-                        skipCount++
-                        return
-                    }
-
-                    const crossSellSkus = await fetchCrossSellSkus(internalGoodSn)
+                    // SKU is the goodSn — pass directly to the API (no page scrape needed)
+                    const crossSellSkus = await fetchCrossSellSkus(sku)
                     if (!crossSellSkus || crossSellSkus.length === 0) {
                         console.log(`  [${sku}] Skip: no cross-sell data from Vevor API (goodSn: ${internalGoodSn})`)
                         skipCount++
