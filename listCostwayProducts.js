@@ -969,6 +969,35 @@ async function updateVariant(
     return res.data.productVariantsBulkUpdate
 }
 
+async function ensureProductOptions(productGid, requiredOptionNames, storeInfo) {
+    // Fetch existing options on the product
+    const res = await shopifyGraphQL(
+        storeInfo,
+        `query getProductOptions($id: ID!) {
+            product(id: $id) {
+                options { id name }
+            }
+        }`,
+        { id: productGid }
+    )
+    const existingNames = new Set((res.data?.product?.options || []).map((o) => o.name))
+    const missing = requiredOptionNames.filter((n) => !existingNames.has(n))
+    if (missing.length === 0) return
+
+    // Create missing options
+    const createRes = await shopifyGraphQL(
+        storeInfo,
+        `mutation productOptionsCreate($productId: ID!, $options: [OptionCreateInput!]!) {
+            productOptionsCreate(productId: $productId, options: $options) {
+                userErrors { field message }
+            }
+        }`,
+        { productId: productGid, options: missing.map((name) => ({ name })) }
+    )
+    const errs = createRes.data?.productOptionsCreate?.userErrors || []
+    if (errs.length > 0) throw new Error(`productOptionsCreate errors: ${JSON.stringify(errs)}`)
+}
+
 async function productVariantsBulkCreate(
     { productId, variants, strategy = 'REMOVE_STANDALONE_VARIANT', media = [] },
     storeInfo
@@ -1328,6 +1357,10 @@ async function listOneParent({
             })
         }
         if (variantInputs.length > 0) {
+            const requiredOptionNames = [
+                ...new Set(variantInputs.flatMap((v) => v.optionValues.map((o) => o.optionName))),
+            ]
+            await ensureProductOptions(existingProductGid, requiredOptionNames, storeInfo)
             const createdVariants = await productVariantsBulkCreate(
                 {
                     productId: existingProductGid,
